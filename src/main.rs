@@ -23,7 +23,7 @@ use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
 use serenity::model::id::ChannelId;
 use std::io::{Read, Write};
-use std::fmt::{Display, Formatter};
+
 
 struct Handler;
 

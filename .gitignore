@@ -4,3 +4,4 @@
 /isolate/
 /.env_prod
 .idea/
+/workdir/

@@ -1,11 +1,11 @@
 use serenity::model::channel::GuildChannel;
-use serenity::model::guild::{Role, Guild, Member};
+use serenity::model::guild::{Role, Member};
 use chrono::prelude::*;
 use std::collections::HashMap;
 use serenity::model::id::{UserId, GuildId};
 
-use serde::{Serialize, Deserialize, Serializer};
-use serde::ser::{Error};
+use serde::{Serialize, Deserialize};
+
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RaidInfo {
