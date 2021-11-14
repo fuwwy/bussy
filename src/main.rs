@@ -1,7 +1,6 @@
-mod guild_shell;
-use guild_shell::*;
-
+use std::collections::HashMap;
 use std::env;
+use std::io::{Read, Write};
 
 use dotenv::dotenv;
 use serenity::{
@@ -21,9 +20,12 @@ use serenity::{
 use serenity::client::bridge::gateway::GatewayIntents;
 use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
-use serenity::model::id::ChannelId;
-use std::io::{Read, Write};
+use serenity::model::guild::Member;
+use serenity::model::id::{ChannelId, GuildId};
 
+use guild_shell::*;
+
+mod guild_shell;
 
 struct Handler;
 
@@ -31,7 +33,7 @@ struct BaseConfigData {
     debug_channel_id: ChannelId,
     bot_token: String,
     application_id: u64,
-    shell_config_file: String
+    shell_config_file: String,
 }
 
 impl TypeMapKey for BaseConfigData {
@@ -41,7 +43,7 @@ impl TypeMapKey for BaseConfigData {
 struct GuildShells {}
 
 impl TypeMapKey for GuildShells {
-    type Value =Vec<GuildShell>;
+    type Value = HashMap<GuildId, GuildShell>;
 }
 
 #[group]
@@ -67,6 +69,16 @@ impl EventHandler for Handler {
             commands = ApplicationCommand::get_global_application_commands(&ctx.http).await;
             println!("Commands were not updated")
         }
+        println!("There is {} commands registered", commands.expect("Commands failed to retrieve.").len())
+    }
+
+    async fn guild_member_addition(&self, _ctx: Context, _guild_id: GuildId, _new_member: Member) {
+        let mut data = _ctx.data.write().await;
+        if let Some(target_guild) = data.get_mut::<GuildShells>().expect("Guild shells must be present in client data").get_mut(&_guild_id) {
+            target_guild.member_joined(&_ctx, _new_member).await;
+        } else {
+            println!("AAA guild shell not set up for guild id {}", _guild_id);  // TODO: implement better error handling
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -89,32 +101,39 @@ impl EventHandler for Handler {
                         .kind(InteractionResponseType::ChannelMessageWithSource)
                         .interaction_response_data(|message| { message.content(content) })
                 })
-                    .await;
+                    .await.expect("Failed to create interaction response");
             };
         }
     }
 }
 
 
-fn load_shells(shell_file: &str) -> Vec<GuildShell> {
-
+fn load_shells(shell_file: &str) -> HashMap<GuildId, GuildShell> {
     let mut file = std::fs::File::open(shell_file).expect("File could not be opened");
 
     let mut data = String::new();
-    file.read_to_string(&mut data);
-    let deserialized: Vec<GuildConfig> =  serde_yaml::from_str(&*data).expect("File could not be deserialized");
-    let shells = deserialized.into_iter().map(|f| GuildShell::deserialized(f)).collect();
+    file.read_to_string(&mut data).expect("File couldn't be read into string");
+    let deserialized: HashMap<GuildId, GuildConfig> = serde_yaml::from_str(&*data).expect("File could not be deserialized");
+    let mut shells: HashMap<GuildId, GuildShell> = Default::default();
+    for (id, config) in deserialized {
+        shells.insert(id, GuildShell::from(config));
+    }
 
     save_shells(&shells, shell_file);  // Instant check whether the file can also be saved.
     shells
 }
 
 
-fn save_shells(shells: &Vec<GuildShell>, shell_file: &str) {
+fn save_shells(shells: &HashMap<GuildId, GuildShell>, shell_file: &str) {
     let mut file = std::fs::File::open(shell_file).expect("Can't open file ");
-    let shell_configs: Vec<&GuildConfig> = shells.into_iter().map(|f| f.get_config()).collect();
+    let mut shell_configs: HashMap<GuildId, &GuildConfig> = Default::default();
+
+    for (id, shell) in shells {
+        shell_configs.insert(id.clone(), shell.get_config());
+    }
+
     let serialized = serde_yaml::to_string(&shell_configs).expect("Can't serialize shells");
-    file.write(serialized.as_ref());
+    file.write(serialized.as_ref()).expect("File couldn't be written into");
 }
 
 async fn run(config: BaseConfigData) {
