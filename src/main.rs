@@ -1,3 +1,6 @@
+mod guild_shell;
+use guild_shell::*;
+
 use std::env;
 
 use dotenv::dotenv;
@@ -8,43 +11,38 @@ use serenity::{
     model::{
         gateway::Ready,
         interactions::{
-            application_command::{
-                ApplicationCommand,
-                ApplicationCommandOptionType,
-            },
+            application_command::ApplicationCommand,
             Interaction,
             InteractionResponseType,
         },
     },
     prelude::*,
 };
-use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
 use serenity::client::bridge::gateway::GatewayIntents;
 use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
-use serenity::futures::future::err;
-use serenity::model::channel::{Channel, ChannelCategory, Embed, GuildChannel, Message, PartialGuildChannel, Reaction, StageInstance};
-use serenity::model::event::{ChannelPinsUpdateEvent, GuildMembersChunkEvent, GuildMemberUpdateEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, PresenceUpdateEvent, ResumedEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent, TypingStartEvent, VoiceServerUpdateEvent};
-use serenity::model::gateway::Presence;
-use serenity::model::guild::{Emoji, Guild, GuildUnavailable, Integration, Member, PartialGuild, Role, ThreadMember};
-use serenity::model::id::{ApplicationId, ChannelId, EmojiId, GuildId, IntegrationId, MessageId, RoleId};
-use serenity::model::invite::RichInvite;
-use serenity::model::prelude::{CurrentUser, User, VoiceState};
-use serenity::utils::MessageBuilder;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use serenity::model::id::ChannelId;
+use std::io::{Read, Write};
+use std::fmt::{Display, Formatter};
 
 struct Handler;
 
-struct BaseConfig;
-
 struct BaseConfigData {
     debug_channel_id: ChannelId,
+    bot_token: String,
+    application_id: u64,
+    shell_config_file: String
 }
 
-impl TypeMapKey for BaseConfig {
+impl TypeMapKey for BaseConfigData {
     type Value = BaseConfigData;
 }
 
+struct GuildShells {}
+
+impl TypeMapKey for GuildShells {
+    type Value =Vec<GuildShell>;
+}
 
 #[group]
 #[commands(ping)]
@@ -97,16 +95,38 @@ impl EventHandler for Handler {
     }
 }
 
-pub async fn run(token: String, application_id: u64) {
+
+fn load_shells(shell_file: &str) -> Vec<GuildShell> {
+
+    let mut file = std::fs::File::open(shell_file).expect("File could not be opened");
+
+    let mut data = String::new();
+    file.read_to_string(&mut data);
+    let deserialized: Vec<GuildConfig> =  serde_yaml::from_str(&*data).expect("File could not be deserialized");
+    let shells = deserialized.into_iter().map(|f| GuildShell::deserialized(f)).collect();
+
+    save_shells(&shells, shell_file);  // Instant check whether the file can also be saved.
+    shells
+}
+
+
+fn save_shells(shells: &Vec<GuildShell>, shell_file: &str) {
+    let mut file = std::fs::File::open(shell_file).expect("Can't open file ");
+    let shell_configs: Vec<&GuildConfig> = shells.into_iter().map(|f| f.get_config()).collect();
+    let serialized = serde_yaml::to_string(&shell_configs).expect("Can't serialize shells");
+    file.write(serialized.as_ref());
+}
+
+async fn run(config: BaseConfigData) {
     let framework = StandardFramework::new()
         .configure(|c| c.prefix("~")) // set the bot's prefix to "~"
         .group(&GENERAL_GROUP);
 
     // Build our client.
-    let mut client = Client::builder(token)
+    let mut client = Client::builder(&config.bot_token)
         .event_handler(Handler)
         .framework(framework)
-        .application_id(application_id)
+        .application_id(config.application_id)
         .intents(GatewayIntents::all())
         .await
         .expect("Error creating client");
@@ -114,15 +134,8 @@ pub async fn run(token: String, application_id: u64) {
     {
         // Open the data lock in write mode, so keys can be inserted to it.
         let mut data = client.data.write().await;
-
-
-        let debug_channel_id = env::var("DEBUG_CHANNEL_ID")
-            .expect("DEBUG_CHANNEL_ID in environment").parse::<ChannelId>()
-            .expect("Debug channel ID to be a valid channel id");
-
-        let config = BaseConfigData { debug_channel_id: debug_channel_id };
-
-        data.insert::<BaseConfig>(config);
+        data.insert::<GuildShells>(load_shells(&*config.shell_config_file));
+        data.insert::<BaseConfigData>(config);
     }
 
 
@@ -149,5 +162,12 @@ async fn main() {
     // The Application Id is usually the Bot User Id.
     let application_id: u64 = env::var("APPLICATION_ID").expect("Application ID in .env").parse::<u64>().expect("Application Id to be a u64");
 
-    run(token, application_id).await;
+
+    let debug_channel_id = env::var("DEBUG_CHANNEL_ID")
+        .expect("DEBUG_CHANNEL_ID in environment").parse::<ChannelId>()
+        .expect("Debug channel ID to be a valid channel id");
+
+    let config = BaseConfigData { debug_channel_id: debug_channel_id, bot_token: token.to_string(), application_id, shell_config_file: "shells.yml".to_string() };
+
+    run(config).await;
 }
