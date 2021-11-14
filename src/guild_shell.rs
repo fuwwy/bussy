@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use serenity::model::guild::{Member};
+use serenity::model::guild::{Member, Guild};
 use serenity::model::id::{GuildId, UserId, ChannelId, RoleId};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,6 +104,17 @@ impl From<GuildConfig> for GuildShell {
     }
 }
 
+impl From<GuildId> for GuildShell {
+    fn from(guild_id: GuildId) -> Self {
+        GuildShell {
+            config: GuildConfig::new(guild_id),
+            current_raid: None,
+            last_raid: None,
+            active_members: Default::default()
+        }
+    }
+}
+
 impl Serialize for GuildShell {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
         self.config.serialize(serializer)
@@ -123,6 +134,7 @@ impl<'a> Deserialize<'a> for GuildShell {
         )
     }
 }
+
 
 impl GuildShell {
     pub fn get_config(&self) -> &GuildConfig {

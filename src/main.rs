@@ -22,8 +22,10 @@ use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
 use serenity::model::guild::Member;
 use serenity::model::id::{ChannelId, GuildId};
+use serenity::framework::standard::Command;
 
 use guild_shell::*;
+use serenity::model::channel::Message;
 
 mod guild_shell;
 
@@ -47,7 +49,7 @@ impl TypeMapKey for GuildShells {
 }
 
 #[group]
-#[commands(ping)]
+#[commands(ping, recreate_shell)]
 struct General;
 
 
@@ -125,7 +127,7 @@ fn load_shells(shell_file: &str) -> HashMap<GuildId, GuildShell> {
 
 
 fn save_shells(shells: &HashMap<GuildId, GuildShell>, shell_file: &str) {
-    let mut file = std::fs::File::open(shell_file).expect("Can't open file ");
+    let mut file = std::fs::File::create(shell_file).expect("Can't open file ");
     let mut shell_configs: HashMap<GuildId, &GuildConfig> = Default::default();
 
     for (id, shell) in shells {
@@ -155,6 +157,7 @@ async fn run(config: BaseConfigData) {
         let mut data = client.data.write().await;
         data.insert::<GuildShells>(load_shells(&*config.shell_config_file));
         data.insert::<BaseConfigData>(config);
+
     }
 
 
@@ -168,7 +171,26 @@ async fn run(config: BaseConfigData) {
 }
 
 #[command]
-async fn ping() -> CommandResult {
+async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
+    let channel = msg.channel(ctx).await.unwrap();
+    if let serenity::model::channel::Channel::Guild(ch) = channel {
+        ch.say(&ctx, "Pong").await;
+    }
+    Ok(())
+}
+
+#[command]
+async fn recreate_shell(ctx: &Context, msg: &Message) -> CommandResult {
+    println!("Got create shell command");
+    let mut data = ctx.data.write().await;
+    let config_file = &data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
+    let shells = data.get_mut::<GuildShells>().unwrap();
+    let guild_id = &msg.guild_id.expect("Message must have guild ID");
+    shells.remove(guild_id);
+    let shell = GuildShell::from(guild_id.clone());
+    shells.insert(guild_id.clone(), shell);
+
+    save_shells(shells, config_file);
     Ok(())
 }
 
