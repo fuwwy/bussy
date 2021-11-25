@@ -20,14 +20,21 @@ use serenity::{
 use serenity::client::bridge::gateway::GatewayIntents;
 use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
-use serenity::model::guild::Member;
-use serenity::model::id::{ChannelId, GuildId};
-use serenity::framework::standard::Command;
+use serenity::model::guild::{Member, Guild, GuildUnavailable, Emoji, Role, PartialGuild, Integration, ThreadMember};
+use serenity::model::id::{ChannelId, GuildId, EmojiId, RoleId, MessageId, IntegrationId, ApplicationId};
+
 
 use guild_shell::*;
-use serenity::model::channel::Message;
+use serenity::model::channel::{Message, GuildChannel, ChannelCategory, Channel, Reaction, StageInstance, PartialGuildChannel};
+use serenity::model::event::{ChannelPinsUpdateEvent, GuildMemberUpdateEvent, GuildMembersChunkEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, PresenceUpdateEvent, ResumedEvent, TypingStartEvent, VoiceServerUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent};
+use serenity::model::prelude::{User, CurrentUser, VoiceState};
+use serenity::model::gateway::Presence;
+use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
+use serenity::model::interactions::application_command::ApplicationCommandOptionType;
+use serde::Serialize;
 
 mod guild_shell;
+mod config_form;
 
 struct Handler;
 
@@ -65,6 +72,21 @@ impl EventHandler for Handler {
                     .create_application_command(|command| {
                         command.name("ping").description("A ping command")
                     })
+                    .create_application_command(|cmd| {
+                        cmd.name("config").description("Configure the server settings for bussy")
+                    })
+                    .create_application_command(|cmd| {
+                        cmd.name("reset_guild_shell").description("Resets the guild settings to default values")
+                    })
+                    .create_application_command(|cmd| {
+                        cmd.name("load_settings").description("Load settings from a raw JSON data")
+                            .create_option(|opt| {
+                                opt.name("settings").description("Settings to load").kind(ApplicationCommandOptionType::String)
+                            })
+                    })
+                    .create_application_command(|cmd| {
+                        cmd.name("dump_settings").description("Dumps the current descriptions as a JSON file")
+                    })
             })
                 .await;
         } else {
@@ -90,11 +112,42 @@ impl EventHandler for Handler {
             // let guild = ctx.cache().expect("Cache not present").guild(author.guild_id).await.expect("Guild not retrievable");
 
 
-            let content = match command.data.name.as_str() {
+            let content: String = match command.data.name.as_str() {
                 "ping" => {
-                    "Pong!"
+                    "Pong!".into()
                 }
-                _ => { "empty" }
+                "reset_guild_shell" => {
+                    _recreate_shell(&ctx, &command.guild_id.unwrap_or(910640456457666631.into())).await;
+                    "cool".into()
+                }
+                "load_settings" => {
+                    let settings: &str = command.data.options.get(0).expect("Settings must be present").value.as_ref().expect("Must have value").as_str().expect("Must be string");
+                    let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
+                    match serde_json::from_str(settings) {
+                        Ok(config) => {
+                            let mut data = ctx.data.write().await;
+                            let shells = data.get_mut::<GuildShells>().unwrap();
+                            shells.get_mut(&guild_id).expect("guild shell must exist").config = config;
+                            save_shells(data.get::<GuildShells>().unwrap(), &*data.get::<BaseConfigData>().unwrap().shell_config_file);
+                            println!("loaded successfully!!")
+                        }
+                        Err(e) => println!("Couldnt parse :( {}", e)
+                    }
+                    "done (maybe, idk)".into()
+
+                }
+                dump_settings => {
+                    let data = ctx.data.read().await;
+                    let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
+                    let shell = data.get::<GuildShells>().unwrap().get(&guild_id).expect("Guild shell must exist");
+
+                    match serde_json::to_string(shell) {
+                        Ok(res) => format!("```json\n{}```", res),
+                        Err(e) => format!("```Failed to convert config into JSON! This should never happen. Error: {}```", e)
+                    }
+
+                }
+                _ => { "empty".into() }
             };
 
             if content != "" {
@@ -106,6 +159,16 @@ impl EventHandler for Handler {
                     .await.expect("Failed to create interaction response");
             };
         }
+    }
+    async fn guild_create(&self, _ctx: Context, _guild: Guild, _is_new: bool) {
+        let mut data = _ctx.data.write().await;
+        let shells = data.get_mut::<GuildShells>().unwrap();
+        if !shells.contains_key(&_guild.id) {
+            shells.insert(_guild.id, GuildShell::from(_guild.id));
+        }
+    }
+    async fn message(&self, _ctx: Context, _new_message: Message) {
+        println!("MESSAGE received aaaa");
     }
 }
 
@@ -143,12 +206,16 @@ async fn run(config: BaseConfigData) {
         .configure(|c| c.prefix("~")) // set the bot's prefix to "~"
         .group(&GENERAL_GROUP);
 
+    let intents = GatewayIntents::default();
+    intents.guild_members();
+    intents.direct_messages();
+
     // Build our client.
     let mut client = Client::builder(&config.bot_token)
         .event_handler(Handler)
         .framework(framework)
         .application_id(config.application_id)
-        .intents(GatewayIntents::all())
+        .intents(intents)
         .await
         .expect("Error creating client");
 
@@ -172,20 +239,24 @@ async fn run(config: BaseConfigData) {
 
 #[command]
 async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
+    println!("Pinged!");
     let channel = msg.channel(ctx).await.unwrap();
     if let serenity::model::channel::Channel::Guild(ch) = channel {
-        ch.say(&ctx, "Pong").await;
+        ch.say(&ctx, "Pong").await.expect("Couldn't respond to ping!");
     }
     Ok(())
 }
 
 #[command]
 async fn recreate_shell(ctx: &Context, msg: &Message) -> CommandResult {
-    println!("Got create shell command");
+    _recreate_shell(&ctx, &msg.guild_id.expect("Guild id")).await
+}
+
+async fn _recreate_shell(ctx: &Context, guild_id: &GuildId) -> CommandResult{
+    println!("Got recreate shell command");
     let mut data = ctx.data.write().await;
     let config_file = &data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
     let shells = data.get_mut::<GuildShells>().unwrap();
-    let guild_id = &msg.guild_id.expect("Message must have guild ID");
     shells.remove(guild_id);
     let shell = GuildShell::from(guild_id.clone());
     shells.insert(guild_id.clone(), shell);
