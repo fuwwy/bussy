@@ -8,6 +8,7 @@ use serenity::client::Context;
 use serenity::model::channel::Message;
 use serenity::Error;
 use std::str::FromStr;
+use crate::config_form::Configurable;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RaidInfo {
@@ -50,9 +51,9 @@ impl MemberShell {
 }
 
 #[derive(Debug)]
-struct ConfigField<T> {
-    _inner: T,
-    // name: String
+pub struct ConfigField<T> {
+    pub(crate) _inner: T,
+    pub(crate) name: String
 }
 
 impl<T> std::ops::Deref for ConfigField<T> {
@@ -63,19 +64,12 @@ impl<T> std::ops::Deref for ConfigField<T> {
     }
 }
 
-impl<T> ConfigField<T> where
-T: FromStr {
-    pub fn set_value(&mut self, new_value: String) -> Result<(), <T as FromStr>::Err> {
-        self._inner = new_value.parse()?;
-        Ok(())
-    }
-}
 
 impl<T> From<T> for ConfigField<T> {
     fn from(val: T) -> Self {
         ConfigField {
             _inner: val,
-            // name: "Unknown!!".to_string()
+            name: "Unknown field name!!".to_string()
         }
     }
 }
@@ -90,7 +84,7 @@ impl<'a, T> Deserialize<'a> for ConfigField<T> where T:Deserialize<'a> {
     fn deserialize<'de, D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'a> {
         let val = T::deserialize(deserializer)?;
         Ok(
-            ConfigField{_inner: val}
+            ConfigField{_inner: val, name: "Deserialized, unknown field name".into()}
         )
     }
 }
@@ -100,7 +94,7 @@ impl<'a, T> Deserialize<'a> for ConfigField<T> where T:Deserialize<'a> {
 
 #[derive(Serialize, Deserialize, Debug)]  // Serializing and deserializing channels will probably have to be reduced to their IDs, not the whole structs
 pub struct GuildConfig {
-    guild_id: GuildId,
+    pub guild_id: GuildId,
     moderation_channel: ConfigField<Option<ChannelId>>,
     raid_containment_channel: ConfigField<Option<ChannelId>>,
     silence_containment_channel: ConfigField<Option<ChannelId>>,
@@ -130,7 +124,7 @@ pub struct GuildConfig {
 
 impl GuildConfig {
     fn new(guild_id: GuildId) -> Self {
-        GuildConfig {
+        let mut new = GuildConfig {
             guild_id,
             moderation_channel: None.into(),
             raid_containment_channel: None.into(),
@@ -149,27 +143,114 @@ impl GuildConfig {
             newline_pressure: 0.714.into(),
             unique_ping_pressure: 2.5.into(),
             pressure_decay_per_second: 8.0.into(),
-        }
+        };
+        new.load_names();
+        new
     }
+
+    fn load_names(&mut self) {
+        self.moderation_channel.name = "moderation_channel".into();
+        self.raid_containment_channel.name = "raid_containment_channel".into();
+        self.silence_containment_channel.name = "silence_containment_channel".into();
+        self.log_channel.name = "log_channel".into();
+        self.member_role.name = "member_role".into();
+        self.silence_role.name = "silence_role".into();
+        self.new_role.name = "new_role".into();
+        self.raid_trigger_timespan.name = "raid_trigger_timespan".into();
+        self.raid_trigger_new_user_limit.name = "raid_trigger_new_user_limit".into();
+        self.raid_autoexpiration.name = "raid_autoexpiration".into();
+        self.max_pressure.name = "max_pressure".into();
+        self.message_pressure.name = "message_pressure".into();
+        self.embed_pressure.name = "embed_pressure".into();
+        self.character_pressure.name = "character_pressure".into();
+        self.newline_pressure.name = "newline_pressure".into();
+        self.unique_ping_pressure.name = "unique_ping_pressure".into();
+        self.pressure_decay_per_second.name = "pressure_decay_per_second".into();
+    }
+
+    pub fn get_configurable_fields(&self) -> Vec<Box<&(dyn Configurable + Send + Send)>> {
+        vec![
+            Box::new(&self.moderation_channel),
+            Box::new(&self.raid_containment_channel),
+            Box::new(&self.silence_containment_channel),
+            Box::new(&self.log_channel),
+            Box::new(&self.member_role),
+            Box::new(&self.silence_role),
+            Box::new(&self.new_role),
+            Box::new(&self.raid_trigger_timespan),
+            Box::new(&self.raid_trigger_new_user_limit),
+            Box::new(&self.raid_autoexpiration),
+            Box::new(&self.max_pressure),
+            Box::new(&self.message_pressure),
+            Box::new(&self.embed_pressure),
+            Box::new(&self.character_pressure),
+            Box::new(&self.newline_pressure),
+            Box::new(&self.unique_ping_pressure),
+            Box::new(&self.pressure_decay_per_second)
+        ]
+    }
+
+    async fn setup_help(&self, ctx: &Context) {
+        let guild = ctx.cache.guild(self.guild_id).await.expect("Guild must be retrievable");
+        let mut helptexts: Vec<String> = Default::default();
+        helptexts.push("Recommended steps you should take:".into());
+        let mut optional_steps: Vec<String> = Default::default();
+        optional_steps.push("Optional steps you could do to improve user experience.".into());
+
+        if self.moderation_channel.is_none() {
+            helptexts.push("You should setup a moderation channel! Make sure Bussy has the correct permissions to send messages there. Should be visible to mods only.".into());
+        }
+
+        if self.log_channel.is_none() {
+            helptexts.push("Consider setting a log channel, where relevant info will be sent. Should be visible to mods only.".into())
+        }
+
+        if self.member_role.is_none() {
+            helptexts.push("Consider setting a member role. This is the base role assigned to everyone.".into())
+        }
+
+        if self.silence_role.is_none() {
+            helptexts.push("Consider setting the 'silence' role. This will be assigned to users who spam and will restrict their permissions".into())
+        }
+
+
+        let to_say = helptexts.join("\n") + &optional_steps.join("\n");
+
+        if let Some(ch) = *self.moderation_channel {
+            ch.say(&ctx, to_say).await.expect("Moderation channel must be sendable to");
+        } else {
+            for ch in guild.channels.values() {
+                if ch.say(&ctx, &to_say).await.is_ok() {
+                    break
+                }
+            }
+        }
+
+    }
+
+
 }
 
 
-pub(crate) struct GuildShell {
+pub struct GuildShell {
     pub config: GuildConfig,
     current_raid: Option<RaidInfo>,
     last_raid: Option<RaidInfo>,
     active_members: HashMap<UserId, MemberShell>,
     log: HashMap<DateTime<Utc>, String>,
+    pub(crate) config_component_id: Option<u32>
 }
 
 impl From<GuildConfig> for GuildShell {
-    fn from(config: GuildConfig) -> Self {
+    fn from(mut config: GuildConfig) -> Self {
+        config.load_names();
         GuildShell {
             config,
             current_raid: None,
             last_raid: None,
             active_members: Default::default(),
-            log: Default::default()
+            log: Default::default(),
+            config_component_id: None
         }
     }
 }
@@ -181,7 +262,8 @@ impl From<GuildId> for GuildShell {
             current_raid: None,
             last_raid: None,
             active_members: Default::default(),
-            log: Default::default()
+            log: Default::default(),
+            config_component_id: None
         }
     }
 }
@@ -195,14 +277,17 @@ impl Serialize for GuildShell {
 impl<'a> Deserialize<'a> for GuildShell {
     fn deserialize<'de, D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'a> {
         let config = GuildConfig::deserialize(deserializer)?;
+        let mut shell = GuildShell {
+            config,
+            current_raid: None,
+            last_raid: None,
+            active_members: Default::default(),
+            log: Default::default(),
+            config_component_id: None
+        };
+        shell.config.load_names();
         Ok(
-            GuildShell {
-                config,
-                current_raid: None,
-                last_raid: None,
-                active_members: Default::default(),
-                log: Default::default()
-            }
+            shell
         )
     }
 }

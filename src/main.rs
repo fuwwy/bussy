@@ -93,7 +93,21 @@ impl EventHandler for Handler {
             commands = ApplicationCommand::get_global_application_commands(&ctx.http).await;
             println!("Commands were not updated")
         }
-        println!("There is {} commands registered", commands.expect("Commands failed to retrieve.").len())
+        println!("There is {} commands registered", commands.expect("Commands failed to retrieve.").len());
+
+        // Ensure a shell for all guilds
+        let guilds = ctx.cache.guilds().await;
+        let mut data = ctx.data.write().await;
+        let shell_filename = &*data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
+        let shells = data.get_mut::<GuildShells>().unwrap();
+        for id in guilds {
+            if !shells.contains_key(&id) {
+                shells.insert(id, GuildShell::from(id));
+                println!("Shell created for guild {} on start", id);
+            }
+        }
+
+        save_shells(&shells, shell_filename);
     }
 
     async fn guild_member_addition(&self, _ctx: Context, _guild_id: GuildId, _new_member: Member) {
@@ -149,6 +163,17 @@ impl EventHandler for Handler {
                         Err(e) => format!("```Failed to convert config into JSON! This should never happen. Error: {}```", e)
                     }
                 }
+                "config" => {
+                    let mut data = ctx.data.write().await;
+                    let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
+                    let mut shell = data.get_mut::<GuildShells>().unwrap().get_mut(&guild_id).expect("Guild shell must exist");
+
+                    if let Err(e) = shell.handle_interaction(&ctx, &interaction).await {
+                        e.to_string()
+                    } else {
+                        "".into()
+                    }
+                }
                 _ => { "empty".into() }
             };
 
@@ -160,9 +185,15 @@ impl EventHandler for Handler {
                 })
                     .await.expect("Failed to create interaction response");
             };
+        } else {
+            let mut data = ctx.data.write().await;
+            for mut shell in data.get_mut::<GuildShells>().unwrap().values_mut() {
+                shell.handle_interaction(&ctx, &interaction);
+            }
         }
     }
     async fn guild_create(&self, _ctx: Context, _guild: Guild, _is_new: bool) {
+        println!("New guild! Id: {}, is new: {}", _guild.id, _is_new);
         let mut data = _ctx.data.write().await;
         let shells = data.get_mut::<GuildShells>().unwrap();
         if !shells.contains_key(&_guild.id) {
