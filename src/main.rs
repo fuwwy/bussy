@@ -163,18 +163,18 @@ impl EventHandler for Handler {
                         Err(e) => format!("```Failed to convert config into JSON! This should never happen. Error: {}```", e)
                     }
                 }
-                "config" => {
+                /*"config" => {
                     let mut data = ctx.data.write().await;
                     let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
-                    let mut shell = data.get_mut::<GuildShells>().unwrap().get_mut(&guild_id).expect("Guild shell must exist");
+                    let shell = data.get_mut::<GuildShells>().unwrap().get_mut(&guild_id).expect("Guild shell must exist");
 
                     if let Err(e) = shell.handle_interaction(&ctx, &interaction).await {
                         e.to_string()
                     } else {
                         "".into()
                     }
-                }
-                _ => { "empty".into() }
+                }*/
+                _ => { "".into() }
             };
 
             if content != "" {
@@ -185,12 +185,15 @@ impl EventHandler for Handler {
                 })
                     .await.expect("Failed to create interaction response");
             };
-        } else {
-            let mut data = ctx.data.write().await;
-            for mut shell in data.get_mut::<GuildShells>().unwrap().values_mut() {
-                shell.handle_interaction(&ctx, &interaction);
-            }
         }
+
+        // All shells handle interaction
+        let mut data = ctx.data.write().await;
+        for shell in data.get_mut::<GuildShells>().unwrap().values_mut() {
+            // println!("Sending to {}", shell.config.guild_id);
+            shell.handle_interaction(&ctx, &interaction).await;
+        }
+
     }
     async fn guild_create(&self, _ctx: Context, _guild: Guild, _is_new: bool) {
         println!("New guild! Id: {}, is new: {}", _guild.id, _is_new);

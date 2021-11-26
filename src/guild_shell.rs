@@ -7,7 +7,6 @@ use serenity::model::id::{GuildId, UserId, ChannelId, RoleId};
 use serenity::client::Context;
 use serenity::model::channel::Message;
 use serenity::Error;
-use std::str::FromStr;
 use crate::config_form::Configurable;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -168,25 +167,25 @@ impl GuildConfig {
         self.pressure_decay_per_second.name = "pressure_decay_per_second".into();
     }
 
-    pub fn get_configurable_fields(&self) -> Vec<Box<&(dyn Configurable + Send + Send)>> {
+    pub fn get_configurable_fields(&mut self) -> Vec<Box<&mut (dyn Configurable + Send + Sync)>> {
         vec![
-            Box::new(&self.moderation_channel),
-            Box::new(&self.raid_containment_channel),
-            Box::new(&self.silence_containment_channel),
-            Box::new(&self.log_channel),
-            Box::new(&self.member_role),
-            Box::new(&self.silence_role),
-            Box::new(&self.new_role),
-            Box::new(&self.raid_trigger_timespan),
-            Box::new(&self.raid_trigger_new_user_limit),
-            Box::new(&self.raid_autoexpiration),
-            Box::new(&self.max_pressure),
-            Box::new(&self.message_pressure),
-            Box::new(&self.embed_pressure),
-            Box::new(&self.character_pressure),
-            Box::new(&self.newline_pressure),
-            Box::new(&self.unique_ping_pressure),
-            Box::new(&self.pressure_decay_per_second)
+            Box::new(&mut self.moderation_channel),
+            Box::new(&mut self.raid_containment_channel),
+            Box::new(&mut self.silence_containment_channel),
+            Box::new(&mut self.log_channel),
+            Box::new(&mut self.member_role),
+            Box::new(&mut self.silence_role),
+            Box::new(&mut self.new_role),
+            Box::new(&mut self.raid_trigger_timespan),
+            Box::new(&mut self.raid_trigger_new_user_limit),
+            Box::new(&mut self.raid_autoexpiration),
+            Box::new(&mut self.max_pressure),
+            Box::new(&mut self.message_pressure),
+            Box::new(&mut self.embed_pressure),
+            Box::new(&mut self.character_pressure),
+            Box::new(&mut self.newline_pressure),
+            Box::new(&mut self.unique_ping_pressure),
+            Box::new(&mut self.pressure_decay_per_second)
         ]
     }
 
