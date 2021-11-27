@@ -24,6 +24,7 @@ use serenity::model::guild::{Member, Guild};
 use serenity::model::id::{ChannelId, GuildId};
 
 
+
 use guild_shell::*;
 use serenity::model::channel::{Message};
 
@@ -265,20 +266,29 @@ async fn run(config: BaseConfigData) {
         .expect("Error creating client");
 
     {
-        // Open the data lock in write mode, so keys can be inserted to it.
+        let shells = load_shells(&*config.shell_config_file);
         let mut data = client.data.write().await;
-        data.insert::<GuildShells>(load_shells(&*config.shell_config_file));
+        data.insert::<GuildShells>(shells);
         data.insert::<BaseConfigData>(config);
-
     }
 
 
-    // Finally, start a single shard, and start listening to events.
-    //
-    // Shards will automatically attempt to reconnect, and will perform
-    // exponential backoff until it reconnects.
+    let shard_manager = client.shard_manager.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Could not register ctrl+c handler");
+        shard_manager.lock().await.shutdown_all().await;
+    });
+
+
     if let Err(why) = client.start().await {
-        println!("Client error: {:?}", why);
+        println!("Cleint exit with error: {}", why);
+    }
+
+    {
+        let data = client.data.write().await;
+        let filename = &data.get::<BaseConfigData>().unwrap().shell_config_file;
+        let shells = data.get::<GuildShells>().unwrap();
+        save_shells(shells, filename);
     }
 }
 
@@ -327,4 +337,5 @@ async fn main() {
     let config = BaseConfigData { debug_channel_id: debug_channel_id, bot_token: token.to_string(), application_id, shell_config_file: "shells.yml".to_string() };
 
     run(config).await;
+
 }
