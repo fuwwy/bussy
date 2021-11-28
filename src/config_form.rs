@@ -242,6 +242,34 @@ impl GuildShell {
         });
     }
 
+    pub async fn dump_logs(&mut self, ctx: &Context) -> Result<(), SerenityError> {
+        if let Some(ch) = *self.config.log_channel {
+            if let Some(serverlog) = self._log.dump() {
+                ch.send_message(&ctx, |msg| {
+                    msg.add_embed(|e| {
+                        e.title("Server info").description(format!("```{}```", serverlog))
+                    })
+                }).await?;   //.dexpect("Failed to send server log  to the log channel", &mut self._log);
+                self._log.clear();
+            }
+
+            for m in self.active_members.values_mut() {
+                if let Some(memberlogs) = m._log.dump() {
+                    ch.send_message(&ctx, |msg| {
+                        msg.add_embed(|e| {
+                            e.title(format!("Member {}", m.member.nick.as_ref().unwrap_or(&m.member.user.name))).description(format!("<@{}>\n```{}```", m.member.user.id, memberlogs))
+                        })
+                    }).await?;   // .dexpect("Failed to send message to the log channel", &mut self._log);
+                    m._log.clear();
+                }
+            }
+            Ok(())
+        } else {
+            Err(SerenityError::Other("No log channel configured"))
+        }
+
+    }
+
     pub async fn handle_interaction(&mut self, ctx: &Context, interaction: &Interaction) -> Result<(), SerenityError> {
         println!("Interaction handling: {}", serde_yaml::to_string(&interaction).unwrap());
 

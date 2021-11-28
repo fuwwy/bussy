@@ -3,13 +3,15 @@ use std::collections::HashMap;
 use chrono::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serenity::model::guild::{Member};
-use serenity::model::id::{GuildId, UserId, ChannelId, RoleId};
+use serenity::model::id::{GuildId, UserId, ChannelId, RoleId, MessageId};
 use serenity::client::Context;
 use serenity::model::channel::Message;
 use serenity::Error;
 use crate::config_form::Configurable;
 use crate::error_handling::*;
 use serenity::prelude::TypeMapKey;
+use std::collections::BTreeMap;
+use serenity::model::prelude::InteractionResponseType::DeferredChannelMessageWithSource;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RaidInfo {
@@ -19,7 +21,24 @@ struct RaidInfo {
 
 //pub type LogData = HashMap<DateTime<Utc>, String>;
 pub struct LogData {
-    records: HashMap<DateTime<Utc>, String>
+    records: BTreeMap<DateTime<Utc>, String>
+}
+
+impl LogData {
+    pub fn dump(&self) -> Option<String> {
+        if self.records.len() == 0 {
+            return None
+        }
+        let mut res = String::new();
+        for log in self.records.iter() {
+            res = format!("{}{}: {}\n", res, log.0, log.1);
+        }
+        Some(res)
+    }
+
+    pub fn clear(&mut self) {
+        self.records.clear();
+    }
 }
 
 impl Default for LogData {
@@ -32,16 +51,21 @@ impl TypeMapKey for LogData {
     type Value = LogData;
 }
 
+type MessageLocation = (MessageId, ChannelId);
+
+
 pub(crate) struct MemberShell {
-    member: Member,
+    pub(crate) member: Member,
     current_pressure: f64,
     pub(crate) _log: LogData,
-    last_pressure_decay: chrono::DateTime<Utc>
+    last_pressure_decay: chrono::DateTime<Utc>,
+    recent_messages: Vec<MessageLocation>,
+    cleanup_in_progress: bool
 }
 
 impl From<Member> for MemberShell {
     fn from(member: Member) -> Self {
-        let shell = MemberShell { member, current_pressure: 0., _log: Default::default(), last_pressure_decay: Utc::now() };
+        let shell = MemberShell { member, current_pressure: 0., _log: Default::default(), last_pressure_decay: Utc::now(), recent_messages: Default::default(), cleanup_in_progress: false };
         shell
     }
 }
@@ -52,6 +76,7 @@ impl MemberShell {
         let to_decay: f64 = (current_time - self.last_pressure_decay).num_seconds() as f64 * decay_per_second;
         if to_decay > self.current_pressure {
             self.current_pressure = 0.;
+            self.recent_messages.clear();
         } else {
             self.current_pressure -= to_decay;
         }
@@ -109,7 +134,7 @@ pub struct GuildConfig {
     moderation_channel: ConfigField<Option<ChannelId>>,
     raid_containment_channel: ConfigField<Option<ChannelId>>,
     silence_containment_channel: ConfigField<Option<ChannelId>>,
-    log_channel: ConfigField<Option<ChannelId>>,
+    pub(crate) log_channel: ConfigField<Option<ChannelId>>,
 
     member_role: ConfigField<Option<RoleId>>,
     silence_role: ConfigField<Option<RoleId>>,
@@ -250,6 +275,7 @@ impl Loggable for LogData {
 
 impl Loggable for LogData {
     fn slog(&mut self, content: String) {
+        println!("New log: {}", &content);
         self.records.insert(Utc::now(), content);
     }
 }
@@ -289,7 +315,7 @@ pub struct GuildShell {
     pub config: GuildConfig,
     current_raid: Option<RaidInfo>,
     last_raid: Option<RaidInfo>,
-    active_members: HashMap<UserId, MemberShell>,
+    pub(crate) active_members: HashMap<UserId, MemberShell>,
     pub(crate) _log: LogData,
     pub(crate) config_component_id: Option<u32>
 }
@@ -411,18 +437,34 @@ impl GuildShell {
 
         if is_shell.is_ok() {
             let shell = self.active_members.get_mut(user_id).unwrap();
+            if shell.cleanup_in_progress {return} // lock member so we don't try to delete nonexisting messages
+            shell.cleanup_in_progress = true;
+
             if let Some(silence_role) = *self.config.silence_role {
-            match shell.member.add_role(&ctx, silence_role).await {
-                Ok(_resp) => shell.log("Member silenced successfully"),
-                Err(e) => shell.slog(format!("Member could not be silenced! {}", e))
-            }
+                match shell.member.add_role(&ctx, silence_role).await {
+                    Ok(_resp) => shell.log("Member silenced successfully"),
+                    Err(e) => shell.slog(format!("Member could not be silenced! {}", e))
+                }
             } else {
                 shell.log("Silence role is not configured! Could not silence.");
             }
+
+            let mut deletion_failed = None;
+            for msg in &shell.recent_messages {
+                match ctx.http.delete_message(msg.1.into(), msg.0.into()).await {
+                    Ok(()) => println!("Deleting a message!"),
+                    Err(e) => deletion_failed = Some(e)
+                }
+            }
+            if let Some(err) = deletion_failed {
+                self._log.slog(format!("Deleting a message failed: {}", err))
+            }
+
+            shell.cleanup_in_progress = false;
         } else {
             self.log("This member could not be silenced (member shell could not be ensured)");
         }
-
+        if self.dump_logs(&ctx).await.is_err() {}
     }
 
     pub async fn message_created(&mut self, ctx: &Context, message: &Message) {
@@ -431,10 +473,16 @@ impl GuildShell {
             let shell = self.active_members.get_mut(&message.author.id).unwrap();
             let pressure = shell.update_pressure(&self.config.pressure_decay_per_second, &pressure);
 
+            shell.recent_messages.push((message.id, message.channel_id));
+
             if pressure > *self.config.max_pressure {
                 shell.slog(format!("Member surpassed the pressure limit of {}", *self.config.max_pressure as i64));
                 self.silence_member(&ctx, &message.author.id).await;
+            } else if pressure > *self.config.max_pressure * 0.0 {
+                println!("Pressure for member {} is {}", shell.member.user.id, pressure);
             }
+        } else {
+            println!("Member shell couldn't be ensured :(");
         }
     }
 }

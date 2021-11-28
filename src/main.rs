@@ -20,18 +20,24 @@ use serenity::{
 use serenity::client::bridge::gateway::GatewayIntents;
 use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
-use serenity::model::guild::{Member, Guild};
-use serenity::model::id::{ChannelId, GuildId};
+use serenity::model::guild::{Member, Guild, GuildUnavailable, Emoji, Role, PartialGuild, Integration, ThreadMember};
+use serenity::model::id::{ChannelId, GuildId, EmojiId, RoleId, MessageId, IntegrationId, ApplicationId};
 
 
 
 use guild_shell::*;
-use serenity::model::channel::{Message};
+use serenity::model::channel::{Message, GuildChannel, ChannelCategory, Channel, Reaction, StageInstance, PartialGuildChannel};
 
 
 
 
 use serenity::model::interactions::application_command::ApplicationCommandOptionType;
+use serenity::model::event::{ChannelPinsUpdateEvent, GuildMemberUpdateEvent, GuildMembersChunkEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, PresenceUpdateEvent, ResumedEvent, TypingStartEvent, VoiceServerUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent};
+use serenity::model::prelude::{User, CurrentUser, VoiceState};
+use serenity::model::gateway::Presence;
+use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
+use serde_json::Value;
+use crate::error_handling::{BetterHandle, Loggable};
 
 
 mod guild_shell;
@@ -120,6 +126,23 @@ impl EventHandler for Handler {
         }
 
         save_shells(&shells, shell_filename);
+
+        let loopctx = ctx.clone();
+        let mut interval_timer = tokio::time::interval(chrono::Duration::seconds(5).to_std().unwrap());
+
+        tokio::spawn(async move {
+            loop {
+                interval_timer.tick().await;
+                // println!("Tick");
+                let mut data = loopctx.data.write().await;
+                let shells = data.get_mut::<GuildShells>().unwrap();
+                for shell in shells.values_mut() {
+                    if !shell.dump_logs(&loopctx.clone()).await.is_ok() {
+                        println!("Couldn't dump logs for {}!", shell.config.guild_id);
+                    }
+                }
+            }
+        });
     }
 
     async fn guild_member_addition(&self, _ctx: Context, _guild_id: GuildId, _new_member: Member) {
@@ -203,7 +226,9 @@ impl EventHandler for Handler {
         let mut data = ctx.data.write().await;
         for shell in data.get_mut::<GuildShells>().unwrap().values_mut() {
             // println!("Sending to {}", shell.config.guild_id);
-            shell.handle_interaction(&ctx, &interaction).await;
+            if let Err(e) = shell.handle_interaction(&ctx, &interaction).await {
+                shell._log.slog(format!("Shell failed to handle interaction: `{}`\n Interaction: ```{}```", e, serde_yaml::to_string(&interaction).unwrap()))
+            }
         }
 
     }
@@ -225,7 +250,7 @@ impl EventHandler for Handler {
                 println!("Guild {} has no shell", guild_id)
             }
         } // Else is a DM
-        println!("MESSAGE received aaaa");
+        println!("{} said {}...", msg.author.name, "something");
     }
 }
 
@@ -263,9 +288,10 @@ async fn run(config: BaseConfigData) {
         .configure(|c| c.prefix("~")) // set the bot's prefix to "~"
         .group(&GENERAL_GROUP);
 
-    let intents = GatewayIntents::default();
-    intents.guild_members();
-    intents.direct_messages();
+    let intents = GatewayIntents::all();
+    // intents.guild_members();
+    // intents.direct_messages();
+
 
     // Build our client.
     let mut client = Client::builder(&config.bot_token)
@@ -285,11 +311,15 @@ async fn run(config: BaseConfigData) {
     }
 
 
+
+
     let shard_manager = client.shard_manager.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("Could not register ctrl+c handler");
         shard_manager.lock().await.shutdown_all().await;
     });
+
+
 
 
     if let Err(why) = client.start().await {
