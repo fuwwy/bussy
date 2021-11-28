@@ -8,6 +8,8 @@ use serenity::client::Context;
 use serenity::model::channel::Message;
 use serenity::Error;
 use crate::config_form::Configurable;
+use crate::error_handling::*;
+use serenity::prelude::TypeMapKey;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RaidInfo {
@@ -15,26 +17,36 @@ struct RaidInfo {
     raiders: Vec<UserId>,
 }
 
-struct MemberShell {
+//pub type LogData = HashMap<DateTime<Utc>, String>;
+pub struct LogData {
+    records: HashMap<DateTime<Utc>, String>
+}
+
+impl Default for LogData {
+    fn default() -> Self {
+        LogData{ records: Default::default() }
+    }
+}
+
+impl TypeMapKey for LogData {
+    type Value = LogData;
+}
+
+pub(crate) struct MemberShell {
     member: Member,
     current_pressure: f64,
-    _log: HashMap<DateTime<Utc>, String>,
+    pub(crate) _log: LogData,
     last_pressure_decay: chrono::DateTime<Utc>
 }
 
 impl From<Member> for MemberShell {
     fn from(member: Member) -> Self {
-        let mut shell = MemberShell { member, current_pressure: 0., _log: Default::default(), last_pressure_decay: Utc::now() };
-        shell.log("Shell created!");
+        let shell = MemberShell { member, current_pressure: 0., _log: Default::default(), last_pressure_decay: Utc::now() };
         shell
     }
 }
 
 impl MemberShell {
-    fn log<S: AsRef<str>>(&mut self, content: S) {
-        self._log.insert(Utc::now(), content.as_ref().parse().unwrap());
-    }
-
     fn update_pressure(&mut self, decay_per_second: &f64, add_pressure: &f64) -> f64 {
         let current_time = Utc::now();
         let to_decay: f64 = (current_time - self.last_pressure_decay).num_seconds() as f64 * decay_per_second;
@@ -122,7 +134,7 @@ pub struct GuildConfig {
 }
 
 impl GuildConfig {
-    fn new(guild_id: GuildId) -> Self {
+    pub(crate) fn new(guild_id: GuildId) -> Self {
         let mut new = GuildConfig {
             guild_id,
             moderation_channel: None.into(),
@@ -190,7 +202,7 @@ impl GuildConfig {
     }
 
     async fn setup_help(&self, ctx: &Context) {
-        let guild = ctx.cache.guild(self.guild_id).await.expect("Guild must be retrievable");
+        let guild = ctx.cache.guild(self.guild_id).await.expect("Couldn't fetch guild");
         let mut helptexts: Vec<String> = Default::default();
         helptexts.push("Recommended steps you should take:".into());
         let mut optional_steps: Vec<String> = Default::default();
@@ -229,6 +241,48 @@ impl GuildConfig {
 
 
 }
+/*
+impl Loggable for LogData {
+    fn slog(&mut self, content: String) {
+        self.insert(Utc::now(), content);
+    }
+}*/
+
+impl Loggable for LogData {
+    fn slog(&mut self, content: String) {
+        self.records.insert(Utc::now(), content);
+    }
+}
+
+impl Loggable for &mut LogData {
+    fn slog(&mut self, content: String) {
+        self.records.insert(Utc::now(), content);
+    }
+}
+
+impl Loggable for &mut MemberShell {
+    fn slog(&mut self, content: String) {
+        self._log.slog(content);
+    }
+}
+
+impl Loggable for MemberShell {
+    fn slog(&mut self, content: String) {
+        self._log.slog(content);
+    }
+}
+
+impl Loggable for GuildShell {
+    fn slog(&mut self, content: String) {
+        self._log.slog(content);
+    }
+}
+
+impl Loggable for &mut GuildShell {
+    fn slog(&mut self, content: String) {
+        self._log.slog(content);
+    }
+}
 
 
 pub struct GuildShell {
@@ -236,7 +290,7 @@ pub struct GuildShell {
     current_raid: Option<RaidInfo>,
     last_raid: Option<RaidInfo>,
     active_members: HashMap<UserId, MemberShell>,
-    log: HashMap<DateTime<Utc>, String>,
+    pub(crate) _log: LogData,
     pub(crate) config_component_id: Option<u32>
 }
 
@@ -248,7 +302,7 @@ impl From<GuildConfig> for GuildShell {
             current_raid: None,
             last_raid: None,
             active_members: Default::default(),
-            log: Default::default(),
+            _log: Default::default(),
             config_component_id: None
         }
     }
@@ -261,7 +315,7 @@ impl From<GuildId> for GuildShell {
             current_raid: None,
             last_raid: None,
             active_members: Default::default(),
-            log: Default::default(),
+            _log: Default::default(),
             config_component_id: None
         }
     }
@@ -281,7 +335,7 @@ impl<'a> Deserialize<'a> for GuildShell {
             current_raid: None,
             last_raid: None,
             active_members: Default::default(),
-            log: Default::default(),
+            _log: Default::default(),
             config_component_id: None
         };
         shell.config.load_names();
@@ -311,7 +365,7 @@ impl GuildShell {
         let new_member_id = new_member.user.id.clone();
         let mut _shell = MemberShell::from(new_member);
         self.active_members.insert(new_member_id, _shell);
-        let shell: &mut MemberShell = self.active_members.get_mut(&new_member_id).expect("Unreachable, we just inserted this member");
+        let shell: &mut MemberShell = self.active_members.get_mut(&new_member_id).dexpect("You should never see this. (member shell inserted but missing)", &mut self._log);
 
         if let Some(raid) = &mut self.current_raid {
             raid.raiders.push(new_member_id);
@@ -320,20 +374,16 @@ impl GuildShell {
             if let Some(member_role) = &*self.config.member_role {
                 match shell.member.add_role(ctx, member_role).await {
                     Ok(_) => shell.log("Member role added"),
-                    Err(e) => shell.log(format!("Adding member role failed! reason: {}", e))
+                    Err(e) => shell.slog(format!("Adding member role failed! reason: {}", e))
                 }
             } else { shell.log("Member role not configured so not assigned.") }
             if let Some(new_role) = &*self.config.new_role {
                 match shell.member.add_role(ctx, new_role).await {
                     Ok(_) => shell.log("'New' role added"),
-                    Err(e) => shell.log(format!("Adding 'new' role failed! reason: {}", e))
+                    Err(e) => shell.slog(format!("Adding 'new' role failed! reason: {}", e))
                 }
             } else { shell.log("'New'' role not configured so not assigned.") }
         }
-    }
-
-    async fn log<S: AsRef<str>>(&mut self, content: S) {
-        self.log.insert(Utc::now(), content.as_ref().parse().unwrap());
     }
 
     async fn ensure_member_shell(&mut self, ctx: &Context, user_id: UserId) -> Result<(), Error> {
@@ -364,13 +414,13 @@ impl GuildShell {
             if let Some(silence_role) = *self.config.silence_role {
             match shell.member.add_role(&ctx, silence_role).await {
                 Ok(_resp) => shell.log("Member silenced successfully"),
-                Err(e) => shell.log(format!("Member could not be silenced! {}", e))
+                Err(e) => shell.slog(format!("Member could not be silenced! {}", e))
             }
             } else {
                 shell.log("Silence role is not configured! Could not silence.");
             }
         } else {
-            self.log("This member could not be silenced (member shell could not be ensured)").await;
+            self.log("This member could not be silenced (member shell could not be ensured)");
         }
 
     }
@@ -382,7 +432,7 @@ impl GuildShell {
             let pressure = shell.update_pressure(&self.config.pressure_decay_per_second, &pressure);
 
             if pressure > *self.config.max_pressure {
-                shell.log(format!("Member surpassed the pressure limit of {}", *self.config.max_pressure as i64));
+                shell.slog(format!("Member surpassed the pressure limit of {}", *self.config.max_pressure as i64));
                 self.silence_member(&ctx, &message.author.id).await;
             }
         }

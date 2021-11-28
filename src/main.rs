@@ -36,6 +36,9 @@ use serenity::model::interactions::application_command::ApplicationCommandOption
 
 mod guild_shell;
 mod config_form;
+mod error_handling;
+
+type ShellMap = HashMap<GuildId, Box<GuildShell>>;
 
 struct Handler;
 
@@ -53,7 +56,7 @@ impl TypeMapKey for BaseConfigData {
 struct GuildShells {}
 
 impl TypeMapKey for GuildShells {
-    type Value = HashMap<GuildId, GuildShell>;
+    type Value = ShellMap;
 }
 
 #[group]
@@ -65,6 +68,7 @@ struct General;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
+        let mut some_config = GuildConfig::new(0.into());
 
         let commands;
         if false {
@@ -88,6 +92,13 @@ impl EventHandler for Handler {
                     .create_application_command(|cmd| {
                         cmd.name("dump_settings").description("Dumps the current descriptions as a JSON file")
                     })
+                    .create_application_command(|cmd| {
+                        cmd.name("change").description("Change a setting manually");
+                        for field in some_config.get_configurable_fields() {
+                            field.add_slash_command_subcommand(cmd);
+                        }
+                        cmd
+                    })
             })
                 .await;
         } else {
@@ -103,7 +114,7 @@ impl EventHandler for Handler {
         let shells = data.get_mut::<GuildShells>().unwrap();
         for id in guilds {
             if !shells.contains_key(&id) {
-                shells.insert(id, GuildShell::from(id));
+                shells.insert(id, Box::new(GuildShell::from(id)));
                 println!("Shell created for guild {} on start", id);
             }
         }
@@ -132,7 +143,7 @@ impl EventHandler for Handler {
                     "Pong!".into()
                 }
                 "reset_guild_shell" => {
-                    match _recreate_shell(&ctx, &command.guild_id.unwrap_or(910640456457666631.into())).await {
+                    match _recreate_shell(&ctx, &command.guild_id.expect("Must be used in a guild")).await {
                         Ok(_) => "cool".into(),
                         Err(e) => format!("Not cool :( {}", e)
                     }
@@ -140,7 +151,7 @@ impl EventHandler for Handler {
                 }
                 "load_settings" => {
                     let settings: &str = command.data.options.get(0).expect("Settings must be present").value.as_ref().expect("Must have value").as_str().expect("Must be string");
-                    let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
+                    let guild_id = command.guild_id.expect("Command must be used in a guild");
                     match serde_json::from_str(settings) {
                         Ok(config) => {
                             let mut data = ctx.data.write().await;
@@ -156,7 +167,7 @@ impl EventHandler for Handler {
                 }
                 "dump_settings" => {
                     let data = ctx.data.read().await;
-                    let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
+                    let guild_id = command.guild_id.unwrap();
                     let shell = data.get::<GuildShells>().unwrap().get(&guild_id).expect("Guild shell must exist");
 
                     match serde_json::to_string(shell) {
@@ -201,7 +212,7 @@ impl EventHandler for Handler {
         let mut data = _ctx.data.write().await;
         let shells = data.get_mut::<GuildShells>().unwrap();
         if !shells.contains_key(&_guild.id) {
-            shells.insert(_guild.id, GuildShell::from(_guild.id));
+            shells.insert(_guild.id, Box::new(GuildShell::from(_guild.id)));
         }
     }
     async fn message(&self, ctx: Context, msg: Message) {
@@ -219,15 +230,15 @@ impl EventHandler for Handler {
 }
 
 
-fn load_shells(shell_file: &str) -> HashMap<GuildId, GuildShell> {
+fn load_shells(shell_file: &str) -> ShellMap {
     let mut file = std::fs::File::open(shell_file).expect("File could not be opened");
 
     let mut data = String::new();
     file.read_to_string(&mut data).expect("File couldn't be read into string");
     let deserialized: HashMap<GuildId, GuildConfig> = serde_yaml::from_str(&*data).expect("File could not be deserialized");
-    let mut shells: HashMap<GuildId, GuildShell> = Default::default();
+    let mut shells: ShellMap = Default::default();
     for (id, config) in deserialized {
-        shells.insert(id, GuildShell::from(config));
+        shells.insert(id, Box::new(GuildShell::from(config)));
     }
 
     save_shells(&shells, shell_file);  // Instant check whether the file can also be saved.
@@ -235,7 +246,7 @@ fn load_shells(shell_file: &str) -> HashMap<GuildId, GuildShell> {
 }
 
 
-fn save_shells(shells: &HashMap<GuildId, GuildShell>, shell_file: &str) {
+fn save_shells(shells: &ShellMap, shell_file: &str) {
     let mut file = std::fs::File::create(shell_file).expect("Can't open file ");
     let mut shell_configs: HashMap<GuildId, &GuildConfig> = Default::default();
 
@@ -270,6 +281,7 @@ async fn run(config: BaseConfigData) {
         let mut data = client.data.write().await;
         data.insert::<GuildShells>(shells);
         data.insert::<BaseConfigData>(config);
+        data.insert::<LogData>(LogData::default());
     }
 
 
@@ -314,7 +326,7 @@ async fn _recreate_shell(ctx: &Context, guild_id: &GuildId) -> CommandResult{
     let shells = data.get_mut::<GuildShells>().unwrap();
     shells.remove(guild_id);
     let shell = GuildShell::from(guild_id.clone());
-    shells.insert(guild_id.clone(), shell);
+    shells.insert(guild_id.clone(), Box::new(shell));
 
     save_shells(shells, config_file);
     Ok(())

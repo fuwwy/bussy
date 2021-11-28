@@ -1,12 +1,14 @@
 use serenity::model::interactions::Interaction;
 use serenity::client::Context;
 use crate::guild_shell::{GuildShell, ConfigField};
-use serenity::builder::{CreateComponents, CreateSelectMenuOptions};
+use serenity::builder::{CreateComponents, CreateSelectMenuOptions, CreateApplicationCommand};
 use serenity::model::id::{ChannelId, RoleId};
 use serenity::prelude::SerenityError;
 use serenity::model::interactions::message_component::ButtonStyle;
 use serenity::model::channel::{ChannelType, GuildChannel};
 use serenity::model::guild::{Role};
+use serenity::model::prelude::application_command::ApplicationCommandOptionType;
+use crate::error_handling::BetterHandle;
 
 
 pub trait Configurable {
@@ -52,6 +54,30 @@ pub trait Configurable {
             })
         });
     }
+
+    fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+        ApplicationCommandOptionType::String
+    }
+
+    fn add_slash_command_subcommand(&self, cmd: &mut CreateApplicationCommand) {
+        cmd
+            .create_option(|opt| {
+                opt.name(self.get_name())
+                    .description(format!("Set the value for {}", self.get_pretty_name()))
+                    .kind(ApplicationCommandOptionType::SubCommand)
+                    .create_sub_option(|sub| {
+                        sub.name("value").description("Value to set (leave empty to reset to default)")
+                            .kind(self.get_slash_command_type())
+                    })
+            });
+
+            /*.name(self.get_name())
+            .description(format!("Set the value for {}", self.get_pretty_name()))
+            .kind(ApplicationCommandOptionType::SubCommand);
+            .create_sub_option(|o| {
+                o.name(format!("{}", self.get_name())).description("The value to set").kind(ApplicationCommandOptionType::String).required(true)
+            })*/
+    }
 }
 
 
@@ -74,6 +100,10 @@ impl Configurable for ConfigField<f64> {
         }
     }
 
+    fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+        ApplicationCommandOptionType::Number
+    }
+
 }
 
 impl Configurable for ConfigField<Option<ChannelId>> {
@@ -85,18 +115,25 @@ impl Configurable for ConfigField<Option<ChannelId>> {
         &self.name
     }
 
+    fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+        ApplicationCommandOptionType::Channel
+    }
+
     fn set_value(&mut self, new_value: String) -> Result<(), String> {
         if new_value == "" {
             self._inner = None;
             return Ok(())
         }
 
-        if let Ok(to_num) = new_value.parse::<u64>() {
-            let channel_id = ChannelId::from(to_num);
+        match new_value.parse::<u64>() {
+            Ok(to_num) => {
+                let channel_id = ChannelId::from(to_num);
                 self._inner = Some(channel_id);
                 return Ok(())
+            }
+            Err(e) => Err(format!("{} is not a valid id: {}", new_value, e))
         }
-        return Err("Not a valid id".into())
+
     }
 
 
@@ -133,6 +170,10 @@ impl Configurable for ConfigField<Option<RoleId>> {
 
     fn get_pretty_name(&self) -> &String {
         &self.name
+    }
+
+        fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+        ApplicationCommandOptionType::Role
     }
 
     fn set_value(&mut self, new_value: String) -> Result<(), String> {
@@ -179,6 +220,10 @@ impl Configurable for ConfigField<u32> {
     fn set_value(&mut self, _new_value: String) -> Result<(), String> {
         todo!()
     }
+
+        fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+        ApplicationCommandOptionType::Integer
+    }
 }
 
 
@@ -203,7 +248,7 @@ impl GuildShell {
         match interaction {
              Interaction::ApplicationCommand(c) => {
                  if c.guild_id != Some(self.config.guild_id) {
-                     println!("Interaction from guild {}, this is shell for {}", c.guild_id.unwrap(), self.config.guild_id);
+                     // println!("Interaction from guild {}, this is shell for {}", c.guild_id.unwrap(), self.config.guild_id);
                      return Ok(())
                  }
              }
@@ -217,28 +262,64 @@ impl GuildShell {
 
         match interaction {
             Interaction::ApplicationCommand(command) => {
-                if command.data.name == "config" {
-                    command.create_interaction_response(&ctx, |resp| {
-                        resp.interaction_response_data(|d| {
-                            d.create_embed(|e|
-                                e
-                                    .title("Bussy configuration")
-                                    .description("Pick which setting do you want to configure. That will bring you onto the next screen."))
-                                .components(|c| {
-                                    self.add_selection_components(c);
-                                    c
+                match command.data.name.as_ref() {
+                    "config" => {
+                        command.create_interaction_response(&ctx, |resp| {
+                            resp.interaction_response_data(|d| {
+                                d.create_embed(|e|
+                                    e
+                                        .title("Bussy configuration")
+                                        .description("Pick which setting do you want to configure. That will bring you onto the next screen."))
+                                    .components(|c| {
+                                        self.add_selection_components(c);
+                                        c
+                                    })
+                            })
+                        }).await.dexpect("Failed to send interaction response", &mut self._log);
+                    }
+                    "change" => {
+                        let fields = self.config.get_configurable_fields();
+                        let name = &command.data.options[0].name;
+                        let value = &command.data.options[0].options[0].value;
+
+
+                        if let Some(field) = fields.into_iter().find(|f| f.get_name() == name) {
+                            let res = match value {
+                                Some(s) => field.set_value(s.as_str().unwrap_or("").to_string()),
+                                None => field.set_value("".to_string())
+                            };
+
+                            let title = match res {
+                                Ok(()) => format!("Change successful"),
+                                Err(_) => format!("No.")
+                            };
+                            let body = match res {
+                                Ok(()) => format!("{} changed successfully", name),
+                                Err(e) => format!("{}", e)
+                            };
+
+                            command.create_interaction_response(&ctx, |resp| {
+                                resp.interaction_response_data(|data| {
+                                    data.create_embed(|e| {
+                                        e.title(title)
+                                            .description(body)
+                                    })
                                 })
-                        })
-                    }).await.unwrap();
+                            }).await?;
+                        }
+
+                    }
+                    _ => println!("Unknown application command {}!", command.data.name)
                 }
+
+
             }
             Interaction::MessageComponent(component) => {
                 //if component.message.clone().regular().unwrap() == self.config.guild_id {
-                let guild = ctx.http.get_guild(self.config.guild_id.into()).await.expect("Guild must be retrievable");
-                // let guild = ctx.cache.guild(self.config.guild_id).await.expect("Guild must be retrievable");
+                let guild = ctx.http.get_guild(self.config.guild_id.into()).await.dexpect("Couldn't fetch guild", &mut self._log);
 
                 let roles: Vec<&Role> = guild.roles.values().collect();
-                let channels= guild.channels(&ctx).await.expect("Guild channels must be retrievable");
+                let channels= guild.channels(&ctx).await.dexpect("Couldn't retrieve guild channels", &mut self._log);
                 let channels = channels.values().filter(|c| c.kind == ChannelType::Text).collect();
 
                 let custom_id = &component.data.custom_id;
@@ -260,32 +341,32 @@ impl GuildShell {
                                             comp
                                         })
                                 })
-                            }).await.expect("Responding to interaction should work");
+                            }).await.dexpect("Failed to respond to interaction", &mut self._log);
                             break;
                         }
                     }
                 }
                 else if custom_id.starts_with("set_") {
-                    for f in self.config.get_configurable_fields() {
-                        if &f.get_setting_key() == custom_id {
-                            let res = f.set_value(component.data.values[0].clone());
-                            let to_say = match res {
-                                Ok(()) => "Value changed successfully!".to_string(),
-                                Err(e) => format!("Couldn't set value: {}", e)
-                            };
-                            component.create_interaction_response(&ctx, |resp| {
-                                resp.interaction_response_data(|data| {
-                                    data.create_embed(|e| {
-                                        e.title("Value change").description(to_say)
-                                    })
-                                        .components(|comp| {
-                                            self.add_selection_components(comp);
-                                            comp
-                                        })
+                    let fl = self.config.get_configurable_fields().into_iter().find(|field| &field.get_setting_key() == custom_id);
+                    if let Some(f) = fl {
+                        let res = f.set_value(component.data.values[0].clone());
+                        let to_say = match res {
+                            Ok(()) => "Value changed successfully!".to_string(),
+                            Err(e) => format!("Couldn't set value: {}", e)
+                        };
+                        component.create_interaction_response(&ctx, |resp| {
+                            resp.interaction_response_data(|data| {
+                                data.create_embed(|e| {
+                                    e.title("Value change").description(to_say)
                                 })
-                            }).await?;
-                            break
-                        }
+                                    .components(|comp| {
+                                        self.add_selection_components(comp);
+                                        comp
+                                    })
+                            })
+                        }).await?;
+                    } else {
+                        println!("Nonexisting field");
                     }
                 }
             }
