@@ -1,17 +1,19 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use chrono::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serenity::model::guild::{Member};
-use serenity::model::id::{GuildId, UserId, ChannelId, RoleId, MessageId};
 use serenity::client::Context;
-use serenity::model::channel::Message;
 use serenity::Error;
+use serenity::model::channel::Message;
+use serenity::model::guild::Member;
+use serenity::model::id::{ChannelId, GuildId, MessageId, RoleId, UserId};
+use serenity::prelude::TypeMapKey;
+use tokio::sync::mpsc;
+
+use crate::{GuildShells, ShellContact, ShellEvent};
 use crate::config_form::Configurable;
 use crate::error_handling::*;
-use serenity::prelude::TypeMapKey;
-use std::collections::BTreeMap;
-use serenity::model::prelude::InteractionResponseType::DeferredChannelMessageWithSource;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RaidInfo {
@@ -21,13 +23,13 @@ struct RaidInfo {
 
 //pub type LogData = HashMap<DateTime<Utc>, String>;
 pub struct LogData {
-    records: BTreeMap<DateTime<Utc>, String>
+    records: BTreeMap<DateTime<Utc>, String>,
 }
 
 impl LogData {
     pub fn dump(&self) -> Option<String> {
         if self.records.len() == 0 {
-            return None
+            return None;
         }
         let mut res = String::new();
         for log in self.records.iter() {
@@ -43,7 +45,7 @@ impl LogData {
 
 impl Default for LogData {
     fn default() -> Self {
-        LogData{ records: Default::default() }
+        LogData { records: Default::default() }
     }
 }
 
@@ -60,7 +62,7 @@ pub(crate) struct MemberShell {
     pub(crate) _log: LogData,
     last_pressure_decay: chrono::DateTime<Utc>,
     recent_messages: Vec<MessageLocation>,
-    cleanup_in_progress: bool
+    cleanup_in_progress: bool,
 }
 
 impl From<Member> for MemberShell {
@@ -89,14 +91,14 @@ impl MemberShell {
 #[derive(Debug)]
 pub struct ConfigField<T> {
     pub(crate) _inner: T,
-    pub(crate) name: String
+    pub(crate) name: String,
 }
 
 impl<T> std::ops::Deref for ConfigField<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        return &self._inner
+        return &self._inner;
     }
 }
 
@@ -105,7 +107,7 @@ impl<T> From<T> for ConfigField<T> {
     fn from(val: T) -> Self {
         ConfigField {
             _inner: val,
-            name: "Unknown field name!!".to_string()
+            name: "Unknown field name!!".to_string(),
         }
     }
 }
@@ -116,16 +118,14 @@ impl<T> Serialize for ConfigField<T> where T: Serialize {
     }
 }
 
-impl<'a, T> Deserialize<'a> for ConfigField<T> where T:Deserialize<'a> {
+impl<'a, T> Deserialize<'a> for ConfigField<T> where T: Deserialize<'a> {
     fn deserialize<'de, D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'a> {
         let val = T::deserialize(deserializer)?;
         Ok(
-            ConfigField{_inner: val, name: "Deserialized, unknown field name".into()}
+            ConfigField { _inner: val, name: "Deserialized, unknown field name".into() }
         )
     }
 }
-
-
 
 
 #[derive(Serialize, Deserialize, Debug)]  // Serializing and deserializing channels will probably have to be reduced to their IDs, not the whole structs
@@ -154,8 +154,6 @@ pub struct GuildConfig {
     unique_ping_pressure: ConfigField<f64>,
     pressure_decay_per_second: ConfigField<f64>,
     // consider adding custom regex filters for pressure, as well as extra pressure for repeated messages
-
-
 }
 
 impl GuildConfig {
@@ -222,7 +220,7 @@ impl GuildConfig {
             Box::new(&mut self.character_pressure),
             Box::new(&mut self.newline_pressure),
             Box::new(&mut self.unique_ping_pressure),
-            Box::new(&mut self.pressure_decay_per_second)
+            Box::new(&mut self.pressure_decay_per_second),
         ]
     }
 
@@ -257,14 +255,11 @@ impl GuildConfig {
         } else {
             for ch in guild.channels.values() {
                 if ch.say(&ctx, &to_say).await.is_ok() {
-                    break
+                    break;
                 }
             }
         }
-
     }
-
-
 }
 /*
 impl Loggable for LogData {
@@ -317,34 +312,8 @@ pub struct GuildShell {
     last_raid: Option<RaidInfo>,
     pub(crate) active_members: HashMap<UserId, MemberShell>,
     pub(crate) _log: LogData,
-    pub(crate) config_component_id: Option<u32>
-}
-
-impl From<GuildConfig> for GuildShell {
-    fn from(mut config: GuildConfig) -> Self {
-        config.load_names();
-        GuildShell {
-            config,
-            current_raid: None,
-            last_raid: None,
-            active_members: Default::default(),
-            _log: Default::default(),
-            config_component_id: None
-        }
-    }
-}
-
-impl From<GuildId> for GuildShell {
-    fn from(guild_id: GuildId) -> Self {
-        GuildShell {
-            config: GuildConfig::new(guild_id),
-            current_raid: None,
-            last_raid: None,
-            active_members: Default::default(),
-            _log: Default::default(),
-            config_component_id: None
-        }
-    }
+    pub(crate) config_component_id: Option<u32>,
+    receiver: mpsc::Receiver<ShellEvent>,
 }
 
 impl Serialize for GuildShell {
@@ -353,26 +322,37 @@ impl Serialize for GuildShell {
     }
 }
 
-impl<'a> Deserialize<'a> for GuildShell {
-    fn deserialize<'de, D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'a> {
-        let config = GuildConfig::deserialize(deserializer)?;
-        let mut shell = GuildShell {
+
+impl GuildShell {
+    pub async fn initialize(ctx: &Context, mut config: GuildConfig) {
+        config.load_names();
+        let (sender, receiver) = tokio::sync::mpsc::channel::<ShellEvent>(20);
+
+        let guild_id = config.guild_id.clone();
+        let mut new_shell = Box::new(GuildShell {
             config,
             current_raid: None,
             last_raid: None,
             active_members: Default::default(),
             _log: Default::default(),
-            config_component_id: None
+            config_component_id: None,
+            receiver,
+        });
+
+        let handle = tokio::spawn(async move { new_shell.listen().await });
+
+        let contact = ShellContact {
+            channel: sender,
+            handle,
         };
-        shell.config.load_names();
-        Ok(
-            shell
-        )
+
+        let mut data = ctx.data.write().await;
+        let shells = data.get_mut::<GuildShells>().unwrap();
+        shells.insert(guild_id, contact);
     }
-}
 
+    async fn listen(&mut self) {}
 
-impl GuildShell {
     pub fn get_config(&self) -> &GuildConfig {
         &self.config
     }
@@ -416,7 +396,7 @@ impl GuildShell {
         let active_members = &mut self.active_members;
 
         if active_members.contains_key(&user_id) {
-            return Ok(())
+            return Ok(());
         }
 
         match self.config.guild_id.member(&ctx, user_id).await {
@@ -424,10 +404,10 @@ impl GuildShell {
                 let sh = MemberShell::from(m);
                 active_members.insert(user_id, sh);
                 Ok(())
-            },
+            }
             Err(e) => {
                 println!("Coudlnt get member wtf {}", e);
-                return Err(e)
+                return Err(e);
             }
         }
     }
@@ -437,7 +417,7 @@ impl GuildShell {
 
         if is_shell.is_ok() {
             let shell = self.active_members.get_mut(user_id).unwrap();
-            if shell.cleanup_in_progress {return} // lock member so we don't try to delete nonexisting messages
+            if shell.cleanup_in_progress { return; } // lock member so we don't try to delete nonexisting messages
             shell.cleanup_in_progress = true;
 
             if let Some(silence_role) = *self.config.silence_role {

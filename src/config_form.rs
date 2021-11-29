@@ -1,15 +1,15 @@
-use serenity::model::interactions::Interaction;
+use serenity::builder::{CreateApplicationCommand, CreateComponents, CreateSelectMenuOptions};
 use serenity::client::Context;
-use crate::guild_shell::{GuildShell, ConfigField};
-use serenity::builder::{CreateComponents, CreateSelectMenuOptions, CreateApplicationCommand};
-use serenity::model::id::{ChannelId, RoleId};
-use serenity::prelude::SerenityError;
-use serenity::model::interactions::message_component::ButtonStyle;
 use serenity::model::channel::{ChannelType, GuildChannel};
-use serenity::model::guild::{Role};
+use serenity::model::guild::Role;
+use serenity::model::id::{ChannelId, RoleId};
+use serenity::model::interactions::Interaction;
+use serenity::model::interactions::message_component::ButtonStyle;
 use serenity::model::prelude::application_command::ApplicationCommandOptionType;
-use crate::error_handling::BetterHandle;
+use serenity::prelude::SerenityError;
 
+use crate::error_handling::BetterHandle;
+use crate::guild_shell::{ConfigField, GuildShell};
 
 pub trait Configurable {
     fn get_name(&self) -> &String;
@@ -35,7 +35,7 @@ pub trait Configurable {
         });
     }
 
-    fn setting_updated(&mut self, key: String, value: String) -> Result<bool, String>{
+    fn setting_updated(&mut self, key: String, value: String) -> Result<bool, String> {
         if self.get_setting_key() == key {
             self.set_value(value)?;
             Ok(true)
@@ -71,12 +71,12 @@ pub trait Configurable {
                     })
             });
 
-            /*.name(self.get_name())
-            .description(format!("Set the value for {}", self.get_pretty_name()))
-            .kind(ApplicationCommandOptionType::SubCommand);
-            .create_sub_option(|o| {
-                o.name(format!("{}", self.get_name())).description("The value to set").kind(ApplicationCommandOptionType::String).required(true)
-            })*/
+        /*.name(self.get_name())
+        .description(format!("Set the value for {}", self.get_pretty_name()))
+        .kind(ApplicationCommandOptionType::SubCommand);
+        .create_sub_option(|o| {
+            o.name(format!("{}", self.get_name())).description("The value to set").kind(ApplicationCommandOptionType::String).required(true)
+        })*/
     }
 }
 
@@ -103,7 +103,6 @@ impl Configurable for ConfigField<f64> {
     fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
         ApplicationCommandOptionType::Number
     }
-
 }
 
 impl Configurable for ConfigField<Option<ChannelId>> {
@@ -122,18 +121,17 @@ impl Configurable for ConfigField<Option<ChannelId>> {
     fn set_value(&mut self, new_value: String) -> Result<(), String> {
         if new_value == "" {
             self._inner = None;
-            return Ok(())
+            return Ok(());
         }
 
         match new_value.parse::<u64>() {
             Ok(to_num) => {
                 let channel_id = ChannelId::from(to_num);
                 self._inner = Some(channel_id);
-                return Ok(())
+                return Ok(());
             }
             Err(e) => Err(format!("{} is not a valid id: {}", new_value, e))
         }
-
     }
 
 
@@ -172,23 +170,23 @@ impl Configurable for ConfigField<Option<RoleId>> {
         &self.name
     }
 
-        fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+    fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
         ApplicationCommandOptionType::Role
     }
 
     fn set_value(&mut self, new_value: String) -> Result<(), String> {
         if new_value == "" {
             self._inner = None;
-            return Ok(())
+            return Ok(());
         }
 
         if let Ok(to_num) = new_value.parse::<u64>() {
             let role_id = RoleId::from(to_num);
-                self._inner = Some(role_id);
-                return Ok(())
+            self._inner = Some(role_id);
+            return Ok(());
 
         }
-        return Err("Not a valid id".into())
+        return Err("Not a valid id".into());
     }
 
     fn make_config_window(&self, components: &mut CreateComponents, roles: Vec<&Role>, _channels: Vec<&GuildChannel>) {
@@ -221,7 +219,7 @@ impl Configurable for ConfigField<u32> {
         todo!()
     }
 
-        fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
+    fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
         ApplicationCommandOptionType::Integer
     }
 }
@@ -267,25 +265,24 @@ impl GuildShell {
         } else {
             Err(SerenityError::Other("No log channel configured"))
         }
-
     }
 
     pub async fn handle_interaction(&mut self, ctx: &Context, interaction: &Interaction) -> Result<(), SerenityError> {
         println!("Interaction handling: {}", serde_yaml::to_string(&interaction).unwrap());
 
         match interaction {
-             Interaction::ApplicationCommand(c) => {
-                 if c.guild_id != Some(self.config.guild_id) {
-                     // println!("Interaction from guild {}, this is shell for {}", c.guild_id.unwrap(), self.config.guild_id);
-                     return Ok(())
-                 }
-             }
-            Interaction::MessageComponent(c) => {
+            Interaction::ApplicationCommand(c) => {
                 if c.guild_id != Some(self.config.guild_id) {
-                    return Ok(())
+                    // println!("Interaction from guild {}, this is shell for {}", c.guild_id.unwrap(), self.config.guild_id);
+                    return Ok(());
                 }
             }
-            _ => println!("Unknown interaction type?? {}", serde_yaml::to_string( &interaction.kind()).unwrap())
+            Interaction::MessageComponent(c) => {
+                if c.guild_id != Some(self.config.guild_id) {
+                    return Ok(());
+                }
+            }
+            _ => println!("Unknown interaction type?? {}", serde_yaml::to_string(&interaction.kind()).unwrap())
         }
 
         match interaction {
@@ -335,19 +332,16 @@ impl GuildShell {
                                 })
                             }).await?;
                         }
-
                     }
                     _ => println!("Unknown application command {}!", command.data.name)
                 }
-
-
             }
             Interaction::MessageComponent(component) => {
                 //if component.message.clone().regular().unwrap() == self.config.guild_id {
                 let guild = ctx.http.get_guild(self.config.guild_id.into()).await.dexpect("Couldn't fetch guild", &mut self._log);
 
                 let roles: Vec<&Role> = guild.roles.values().collect();
-                let channels= guild.channels(&ctx).await.dexpect("Couldn't retrieve guild channels", &mut self._log);
+                let channels = guild.channels(&ctx).await.dexpect("Couldn't retrieve guild channels", &mut self._log);
                 let channels = channels.values().filter(|c| c.kind == ChannelType::Text).collect();
 
                 let custom_id = &component.data.custom_id;
@@ -373,8 +367,7 @@ impl GuildShell {
                             break;
                         }
                     }
-                }
-                else if custom_id.starts_with("set_") {
+                } else if custom_id.starts_with("set_") {
                     let fl = self.config.get_configurable_fields().into_iter().find(|field| &field.get_setting_key() == custom_id);
                     if let Some(f) = fl {
                         let res = f.set_value(component.data.values[0].clone());

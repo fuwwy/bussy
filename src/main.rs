@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 use dotenv::dotenv;
 use serenity::{
@@ -20,33 +21,40 @@ use serenity::{
 use serenity::client::bridge::gateway::GatewayIntents;
 use serenity::framework::standard::CommandResult;
 use serenity::framework::StandardFramework;
-use serenity::model::guild::{Member, Guild, GuildUnavailable, Emoji, Role, PartialGuild, Integration, ThreadMember};
-use serenity::model::id::{ChannelId, GuildId, EmojiId, RoleId, MessageId, IntegrationId, ApplicationId};
-
-
+use serenity::model::channel::Message;
+use serenity::model::guild::{Guild, Member};
+use serenity::model::id::{ChannelId, GuildId};
+use serenity::model::interactions::application_command::ApplicationCommandOptionType;
+use tokio::sync::*;
+use tokio::task::JoinHandle;
 
 use guild_shell::*;
-use serenity::model::channel::{Message, GuildChannel, ChannelCategory, Channel, Reaction, StageInstance, PartialGuildChannel};
-
-
-
-
-use serenity::model::interactions::application_command::ApplicationCommandOptionType;
-use serenity::model::event::{ChannelPinsUpdateEvent, GuildMemberUpdateEvent, GuildMembersChunkEvent, InviteCreateEvent, InviteDeleteEvent, MessageUpdateEvent, PresenceUpdateEvent, ResumedEvent, TypingStartEvent, VoiceServerUpdateEvent, ThreadListSyncEvent, ThreadMembersUpdateEvent};
-use serenity::model::prelude::{User, CurrentUser, VoiceState};
-use serenity::model::gateway::Presence;
-use serenity::client::bridge::gateway::event::ShardStageUpdateEvent;
-use serde_json::Value;
-use crate::error_handling::{BetterHandle, Loggable};
-
 
 mod guild_shell;
 mod config_form;
 mod error_handling;
 
-type ShellMap = HashMap<GuildId, Box<GuildShell>>;
+struct ShellContact {
+    channel: mpsc::Sender<ShellEvent>,
+    handle: JoinHandle<()>,
+}
+
+type ShellMap = HashMap<GuildId, ShellContact>;
 
 struct Handler;
+
+enum ShellEvent {
+    NewMessage(Context, Message),
+    MemberJoined(Context, Member),
+    NewInteraction(Context, Interaction),
+    GetConfig(oneshot::Sender<GuildConfig>),
+}
+
+struct GuildShells {}
+
+impl TypeMapKey for GuildShells {
+    type Value = HashMap<GuildId, ShellContact>;
+}
 
 struct BaseConfigData {
     debug_channel_id: ChannelId,
@@ -59,11 +67,6 @@ impl TypeMapKey for BaseConfigData {
     type Value = BaseConfigData;
 }
 
-struct GuildShells {}
-
-impl TypeMapKey for GuildShells {
-    type Value = ShellMap;
-}
 
 #[group]
 #[commands(ping, recreate_shell)]
@@ -72,7 +75,7 @@ struct General;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, ctx: Context, ready: Ready) {
+    async fn ready(&self, mut ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
         let mut some_config = GuildConfig::new(0.into());
 
@@ -113,22 +116,29 @@ impl EventHandler for Handler {
         }
         println!("There is {} commands registered", commands.expect("Commands failed to retrieve.").len());
 
+
+        load_shells(&mut ctx).await;
+
         // Ensure a shell for all guilds
         let guilds = ctx.cache.guilds().await;
         let mut data = ctx.data.write().await;
-        let shell_filename = &*data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
         let shells = data.get_mut::<GuildShells>().unwrap();
+
         for id in guilds {
             if !shells.contains_key(&id) {
-                shells.insert(id, Box::new(GuildShell::from(id)));
+                GuildShell::initialize(&ctx, GuildConfig::new(id)).await;
                 println!("Shell created for guild {} on start", id);
             }
         }
+        drop(data);
 
-        save_shells(&shells, shell_filename);
+        save_shells(&mut ctx.data).await;
 
+        /*
         let loopctx = ctx.clone();
         let mut interval_timer = tokio::time::interval(chrono::Duration::seconds(5).to_std().unwrap());
+
+
 
         tokio::spawn(async move {
             loop {
@@ -143,12 +153,14 @@ impl EventHandler for Handler {
                 }
             }
         });
+
+         */
     }
 
-    async fn guild_member_addition(&self, _ctx: Context, _guild_id: GuildId, _new_member: Member) {
-        let mut data = _ctx.data.write().await;
-        if let Some(target_guild) = data.get_mut::<GuildShells>().expect("Guild shells must be present in client data").get_mut(&_guild_id) {
-            target_guild.member_joined(&_ctx, _new_member).await;
+    async fn guild_member_addition(&self, ctx: Context, _guild_id: GuildId, new_member: Member) {
+        let mut data = ctx.data.write().await;
+        if let Some(target_guild) = data.get_mut::<GuildShells>().unwrap().get_mut(&_guild_id) {
+            target_guild.channel.send(ShellEvent::MemberJoined(ctx.clone(), new_member)).await;
         } else {
             println!("AAA guild shell not set up for guild id {}", _guild_id);  // TODO: implement better error handling
         }
@@ -170,8 +182,8 @@ impl EventHandler for Handler {
                         Ok(_) => "cool".into(),
                         Err(e) => format!("Not cool :( {}", e)
                     }
-
                 }
+                /*
                 "load_settings" => {
                     let settings: &str = command.data.options.get(0).expect("Settings must be present").value.as_ref().expect("Must have value").as_str().expect("Must be string");
                     let guild_id = command.guild_id.expect("Command must be used in a guild");
@@ -186,8 +198,9 @@ impl EventHandler for Handler {
                         Err(e) => println!("Couldnt parse :( {}", e)
                     }
                     "done (maybe, idk)".into()
-
                 }
+
+
                 "dump_settings" => {
                     let data = ctx.data.read().await;
                     let guild_id = command.guild_id.unwrap();
@@ -197,7 +210,8 @@ impl EventHandler for Handler {
                         Ok(res) => format!("```json\n{}```", res),
                         Err(e) => format!("```Failed to convert config into JSON! This should never happen. Error: {}```", e)
                     }
-                }
+                }*/
+
                 /*"config" => {
                     let mut data = ctx.data.write().await;
                     let guild_id = command.guild_id.unwrap_or(GuildId::from(910640456457666631));
@@ -223,60 +237,68 @@ impl EventHandler for Handler {
         }
 
         // All shells handle interaction
-        let mut data = ctx.data.write().await;
-        for shell in data.get_mut::<GuildShells>().unwrap().values_mut() {
-            // println!("Sending to {}", shell.config.guild_id);
-            if let Err(e) = shell.handle_interaction(&ctx, &interaction).await {
-                shell._log.slog(format!("Shell failed to handle interaction: `{}`\n Interaction: ```{}```", e, serde_yaml::to_string(&interaction).unwrap()))
-            }
-        }
+        let data = ctx.data.write().await;
 
+        let guild_id = {
+            match &interaction {
+                Interaction::Ping(_ping) => { return; }
+                Interaction::ApplicationCommand(cmd) => { cmd.guild_id }
+                Interaction::MessageComponent(cmp) => { cmp.guild_id }
+            }
+        }.expect("Interaction must have guild id i guess");
+
+        let shell = data.get::<GuildShells>().unwrap().get(&guild_id).expect("nonexistent guild smh");
+        shell.channel.send(ShellEvent::NewInteraction(ctx.clone(), interaction)).await;
     }
-    async fn guild_create(&self, _ctx: Context, _guild: Guild, _is_new: bool) {
-        println!("New guild! Id: {}, is new: {}", _guild.id, _is_new);
-        let mut data = _ctx.data.write().await;
-        let shells = data.get_mut::<GuildShells>().unwrap();
-        if !shells.contains_key(&_guild.id) {
-            shells.insert(_guild.id, Box::new(GuildShell::from(_guild.id)));
-        }
+    async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: bool) {
+        println!("New guild! Id: {}, is new: {}", guild.id, _is_new);
+        GuildShell::initialize(&ctx, GuildConfig::new(guild.id)).await;
     }
     async fn message(&self, ctx: Context, msg: Message) {
         let mut data = ctx.data.write().await;
+        println!("{} said {}...", msg.author.name, "something");
         if let Some(guild_id) = &msg.guild_id {
             if let Some(shell) = data.get_mut::<GuildShells>().unwrap().get_mut(guild_id) {
-                shell.message_created(&ctx, &msg).await;
-            }
-            else {
+                shell.channel.send(ShellEvent::NewMessage(ctx.clone(), msg)).await;
+            } else {
                 println!("Guild {} has no shell", guild_id)
             }
         } // Else is a DM
-        println!("{} said {}...", msg.author.name, "something");
     }
 }
 
 
-fn load_shells(shell_file: &str) -> ShellMap {
-    let mut file = std::fs::File::open(shell_file).expect("File could not be opened");
+async fn load_shells(ctx: &mut Context) {
+    let filename = ctx.data.read().await.get::<BaseConfigData>().unwrap().shell_config_file.clone();
+    let mut file = std::fs::File::open(filename).expect("File could not be opened");
 
     let mut data = String::new();
     file.read_to_string(&mut data).expect("File couldn't be read into string");
     let deserialized: HashMap<GuildId, GuildConfig> = serde_yaml::from_str(&*data).expect("File could not be deserialized");
-    let mut shells: ShellMap = Default::default();
-    for (id, config) in deserialized {
-        shells.insert(id, Box::new(GuildShell::from(config)));
+    for (_id, config) in deserialized {
+        GuildShell::initialize(ctx, config).await;
     }
 
-    save_shells(&shells, shell_file);  // Instant check whether the file can also be saved.
-    shells
+    save_shells(&mut ctx.data).await;  // Instant check whether the file can also be saved.
 }
 
 
-fn save_shells(shells: &ShellMap, shell_file: &str) {
-    let mut file = std::fs::File::create(shell_file).expect("Can't open file ");
-    let mut shell_configs: HashMap<GuildId, &GuildConfig> = Default::default();
+async fn save_shells(dat: &mut Arc<RwLock<TypeMap>>) {
+    let mut data = dat.write().await;
+    let filename = data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
+    let shells = data.get_mut::<GuildShells>().unwrap();
 
-    for (id, shell) in shells {
-        shell_configs.insert(id.clone(), shell.get_config());
+    let mut file = std::fs::File::create(filename).expect("Can't open file ");
+    let mut shell_configs: HashMap<GuildId, GuildConfig> = Default::default();
+
+    for (id, shell) in shells {  // TODO: Rewrite to collect configs concurrently
+        let (sender, receiver) = oneshot::channel();
+        shell.channel.send(ShellEvent::GetConfig(sender)).await;
+        if let Ok(config) = receiver.await {
+            shell_configs.insert(id.clone(), config);
+        } else {
+            println!("Error retrieving the config for guild {}", id);
+        }
     }
 
     let serialized = serde_yaml::to_string(&shell_configs).expect("Can't serialize shells");
@@ -302,15 +324,13 @@ async fn run(config: BaseConfigData) {
         .await
         .expect("Error creating client");
 
+
     {
-        let shells = load_shells(&*config.shell_config_file);
         let mut data = client.data.write().await;
-        data.insert::<GuildShells>(shells);
+        data.insert::<GuildShells>(Default::default());
         data.insert::<BaseConfigData>(config);
         data.insert::<LogData>(LogData::default());
     }
-
-
 
 
     let shard_manager = client.shard_manager.clone();
@@ -320,17 +340,12 @@ async fn run(config: BaseConfigData) {
     });
 
 
-
-
     if let Err(why) = client.start().await {
         println!("Cleint exit with error: {}", why);
     }
 
     {
-        let data = client.data.write().await;
-        let filename = &data.get::<BaseConfigData>().unwrap().shell_config_file;
-        let shells = data.get::<GuildShells>().unwrap();
-        save_shells(shells, filename);
+        save_shells(&mut client.data).await;
     }
 }
 
@@ -349,17 +364,21 @@ async fn recreate_shell(ctx: &Context, msg: &Message) -> CommandResult {
     _recreate_shell(&ctx, &msg.guild_id.expect("Guild id")).await
 }
 
-async fn _recreate_shell(ctx: &Context, guild_id: &GuildId) -> CommandResult{
+async fn _recreate_shell(_ctx: &Context, _guild_id: &GuildId) -> CommandResult {
+    todo!();
+    /*
     println!("Got recreate shell command");
     let mut data = ctx.data.write().await;
     let config_file = &data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
     let shells = data.get_mut::<GuildShells>().unwrap();
     shells.remove(guild_id);
-    let shell = GuildShell::from(guild_id.clone());
-    shells.insert(guild_id.clone(), Box::new(shell));
 
-    save_shells(shells, config_file);
+    GuildShell::initialize(ctx, GuildConfig::new(guild_id.clone())).await;
+
+    save_shells(&mut ctx.data).await;
     Ok(())
+
+     */
 }
 
 #[tokio::main]
@@ -379,5 +398,4 @@ async fn main() {
     let config = BaseConfigData { debug_channel_id: debug_channel_id, bot_token: token.to_string(), application_id, shell_config_file: "shells.yml".to_string() };
 
     run(config).await;
-
 }

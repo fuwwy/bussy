@@ -1,6 +1,4 @@
-
-use crate::guild_shell::{LogData};
-
+use crate::guild_shell::LogData;
 
 pub(crate) trait Loggable {
     fn slog(&mut self, content: String);
@@ -39,7 +37,7 @@ impl<T> BetterHandle<T> for Option<T> {
 }
 
 impl<T, E> BetterHandle<T> for Result<T, E>
-where E: std::fmt::Display
+    where E: std::fmt::Display
 {
     fn dexpect(self, msg: &str, log: &mut LogData) -> T {
         match self {
