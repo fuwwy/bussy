@@ -184,7 +184,6 @@ impl Configurable for ConfigField<Option<RoleId>> {
             let role_id = RoleId::from(to_num);
             self._inner = Some(role_id);
             return Ok(());
-
         }
         return Err("Not a valid id".into());
     }
@@ -241,6 +240,15 @@ impl GuildShell {
     }
 
     pub async fn dump_logs(&mut self, ctx: &Context) -> Result<(), SerenityError> {
+        let res = self._dump_logs(ctx).await;
+        match &res {
+            Ok(()) => { println!("Logs dumped successfully") }
+            Err(e) => { println!("Dumping logs failed: {}", e) }
+        }
+        res
+    }
+
+    async fn _dump_logs(&mut self, ctx: &Context) -> Result<(), SerenityError> {
         if let Some(ch) = *self.config.log_channel {
             if let Some(serverlog) = self._log.dump() {
                 ch.send_message(&ctx, |msg| {
@@ -255,7 +263,7 @@ impl GuildShell {
                 if let Some(memberlogs) = m._log.dump() {
                     ch.send_message(&ctx, |msg| {
                         msg.add_embed(|e| {
-                            e.title(format!("Member {}", m.member.nick.as_ref().unwrap_or(&m.member.user.name))).description(format!("<@{}>\n```{}```", m.member.user.id, memberlogs))
+                            e.title(format!("Member {} was silenced!", m.member.nick.as_ref().unwrap_or(&m.member.user.name))).description(format!("<@{}>\n```{}```", m.member.user.id, memberlogs))
                         })
                     }).await?;   // .dexpect("Failed to send message to the log channel", &mut self._log);
                     m._log.clear();
@@ -263,6 +271,7 @@ impl GuildShell {
             }
             Ok(())
         } else {
+            println!("Coudlnt dump logs");
             Err(SerenityError::Other("No log channel configured"))
         }
     }

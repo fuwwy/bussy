@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::fmt::{Display, Formatter};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -48,6 +49,19 @@ enum ShellEvent {
     MemberJoined(Context, Member),
     NewInteraction(Context, Interaction),
     GetConfig(oneshot::Sender<GuildConfig>),
+}
+
+impl Display for ShellEvent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            match self {
+                ShellEvent::NewMessage(_, _) => { "Event: New message" }
+                ShellEvent::MemberJoined(_, _) => { "Event: Member joined" }
+                ShellEvent::NewInteraction(_, _) => { "Event: New interaction" }
+                ShellEvent::GetConfig(_) => { "Event: Config requested" }
+            }
+        )
+    }
 }
 
 struct GuildShells {}
@@ -158,6 +172,10 @@ impl EventHandler for Handler {
     }
 
     async fn guild_member_addition(&self, ctx: Context, _guild_id: GuildId, new_member: Member) {
+        if new_member.user.bot {
+            return;
+        }
+
         let mut data = ctx.data.write().await;
         if let Some(target_guild) = data.get_mut::<GuildShells>().unwrap().get_mut(&_guild_id) {
             target_guild.channel.send(ShellEvent::MemberJoined(ctx.clone(), new_member)).await;
@@ -255,6 +273,10 @@ impl EventHandler for Handler {
         GuildShell::initialize(&ctx, GuildConfig::new(guild.id)).await;
     }
     async fn message(&self, ctx: Context, msg: Message) {
+        if msg.author.bot {
+            return;
+        }
+
         let mut data = ctx.data.write().await;
         println!("{} said {}...", msg.author.name, "something");
         if let Some(guild_id) = &msg.guild_id {

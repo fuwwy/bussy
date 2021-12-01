@@ -8,7 +8,7 @@ use serenity::Error;
 use serenity::model::channel::Message;
 use serenity::model::guild::Member;
 use serenity::model::id::{ChannelId, GuildId, MessageId, RoleId, UserId};
-use serenity::prelude::TypeMapKey;
+use serenity::prelude::{SerenityError, TypeMapKey};
 use tokio::sync::mpsc;
 
 use crate::{GuildShells, ShellContact, ShellEvent};
@@ -33,7 +33,7 @@ impl LogData {
         }
         let mut res = String::new();
         for log in self.records.iter() {
-            res = format!("{}{}: {}\n", res, log.0, log.1);
+            res = format!("{}{}: {}\n", res, log.0.format("%H:%M:%S UTC"), log.1);
         }
         Some(res)
     }
@@ -88,7 +88,7 @@ impl MemberShell {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigField<T> {
     pub(crate) _inner: T,
     pub(crate) name: String,
@@ -128,7 +128,7 @@ impl<'a, T> Deserialize<'a> for ConfigField<T> where T: Deserialize<'a> {
 }
 
 
-#[derive(Serialize, Deserialize, Debug)]  // Serializing and deserializing channels will probably have to be reduced to their IDs, not the whole structs
+#[derive(Serialize, Deserialize, Debug, Clone)]  // Serializing and deserializing channels will probably have to be reduced to their IDs, not the whole structs
 pub struct GuildConfig {
     pub guild_id: GuildId,
     moderation_channel: ConfigField<Option<ChannelId>>,
@@ -325,6 +325,7 @@ impl Serialize for GuildShell {
 
 impl GuildShell {
     pub async fn initialize(ctx: &Context, mut config: GuildConfig) {
+        println!("Initializing thread for {}!", config.guild_id);
         config.load_names();
         let (sender, receiver) = tokio::sync::mpsc::channel::<ShellEvent>(20);
 
@@ -351,7 +352,40 @@ impl GuildShell {
         shells.insert(guild_id, contact);
     }
 
-    async fn listen(&mut self) {}
+    async fn listen(&mut self) {
+        loop {
+            for event in self.receiver.recv().await {
+                println!("Guild {} received {}", self.config.guild_id, event);
+                let res = match event {
+                    ShellEvent::NewMessage(ctx, msg) => {
+                        let res = self.message_created(&ctx, &msg).await;
+                        self.dump_logs(&ctx).await;
+                        res
+                    }
+                    ShellEvent::MemberJoined(ctx, member) => {
+                        let res = self.member_joined(&ctx, member).await;
+                        self.dump_logs(&ctx).await;
+                        res
+                    }
+                    ShellEvent::NewInteraction(ctx, interaction) => {
+                        let res = self.handle_interaction(&ctx, &interaction).await;
+                        self.dump_logs(&ctx).await;
+                        res
+                    }
+                    ShellEvent::GetConfig(sender) => {
+                        if sender.send(self.config.clone()).is_ok() {
+                            Ok(())
+                        } else {
+                            Err(serenity::Error::Other("Failed to respond with config"))
+                        }
+                    }
+                };
+                if let Err(e) = res {
+                    self.slog(e.to_string());
+                }
+            }
+        }
+    }
 
     pub fn get_config(&self) -> &GuildConfig {
         &self.config
@@ -367,7 +401,7 @@ impl GuildShell {
         pressure
     }
 
-    pub async fn member_joined(&mut self, ctx: &Context, new_member: Member) {
+    pub async fn member_joined(&mut self, ctx: &Context, new_member: Member) -> Result<(), SerenityError> {
         let new_member_id = new_member.user.id.clone();
         let mut _shell = MemberShell::from(new_member);
         self.active_members.insert(new_member_id, _shell);
@@ -390,6 +424,7 @@ impl GuildShell {
                 }
             } else { shell.log("'New'' role not configured so not assigned.") }
         }
+        Ok(())
     }
 
     async fn ensure_member_shell(&mut self, ctx: &Context, user_id: UserId) -> Result<(), Error> {
@@ -436,8 +471,9 @@ impl GuildShell {
                     Err(e) => deletion_failed = Some(e)
                 }
             }
-            if let Some(err) = deletion_failed {
-                self._log.slog(format!("Deleting a message failed: {}", err))
+            if let Some(_err) = deletion_failed {
+
+                // self._log.slog(format!("Deleting a message failed: {}", err))
             }
 
             shell.cleanup_in_progress = false;
@@ -447,7 +483,7 @@ impl GuildShell {
         if self.dump_logs(&ctx).await.is_err() {}
     }
 
-    pub async fn message_created(&mut self, ctx: &Context, message: &Message) {
+    pub async fn message_created(&mut self, ctx: &Context, message: &Message) -> Result<(), SerenityError> {
         if self.ensure_member_shell(&ctx, message.author.id).await.is_ok() {
             let pressure = self.calculate_message_pressure(&message);
             let shell = self.active_members.get_mut(&message.author.id).unwrap();
@@ -461,8 +497,9 @@ impl GuildShell {
             } else if pressure > *self.config.max_pressure * 0.0 {
                 println!("Pressure for member {} is {}", shell.member.user.id, pressure);
             }
+            Ok(())
         } else {
-            println!("Member shell couldn't be ensured :(");
+            Err(serenity::Error::Other("Member shell couldn't be ensured :("))
         }
     }
 }
