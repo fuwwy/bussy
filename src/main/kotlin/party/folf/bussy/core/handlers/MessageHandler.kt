@@ -1,6 +1,9 @@
 package party.folf.bussy.core.handlers
 
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import net.dv8tion.jda.api.events.message.guild.GuildMessageReceivedEvent
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
@@ -8,6 +11,7 @@ import party.folf.bussy.Bussy
 
 class MessageHandler(val bussy: Bussy) {
     private val log: Logger = LoggerFactory.getLogger(MessageHandler::class.java)
+    private val pressureHandler = PressureHandler()
 
     fun handle(event: GuildMessageReceivedEvent) {
         // TODO: cache guilds previously searched
@@ -23,7 +27,7 @@ class MessageHandler(val bussy: Bussy) {
             }
             val guild = job.getCompleted()
 
-            event.channel.sendMessage(guild.guildId.toString()).queue()
+            pressureHandler.handle(event, guild)
         }
     }
 }
