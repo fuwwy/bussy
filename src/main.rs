@@ -31,6 +31,8 @@ use tokio::task::JoinHandle;
 
 use guild_shell::*;
 
+
+
 mod guild_shell;
 mod config_form;
 mod error_handling;
@@ -94,7 +96,7 @@ impl EventHandler for Handler {
         let mut some_config = GuildConfig::new(0.into());
 
         let commands;
-        if false {
+        if true {
             commands = ApplicationCommand::set_global_application_commands(&ctx.http, |commands| {
                 commands
                     .create_application_command(|command| {
@@ -121,6 +123,9 @@ impl EventHandler for Handler {
                             field.add_slash_command_subcommand(cmd);
                         }
                         cmd
+                    })
+                    .create_application_command(|cmd| {
+                        cmd.name("setup").description("Get help setting up Bussy for best experience")
                     })
             })
                 .await;
@@ -218,17 +223,23 @@ impl EventHandler for Handler {
                     "done (maybe, idk)".into()
                 }
 
+                 */
+
 
                 "dump_settings" => {
                     let data = ctx.data.read().await;
                     let guild_id = command.guild_id.unwrap();
                     let shell = data.get::<GuildShells>().unwrap().get(&guild_id).expect("Guild shell must exist");
 
-                    match serde_json::to_string(shell) {
+                    let (send, rc) = oneshot::channel();
+                    shell.channel.send(ShellEvent::GetConfig(send)).await;
+                    let config = rc.await.expect("Failed to retrieve guild config");
+
+                    match serde_json::to_string(&config) {
                         Ok(res) => format!("```json\n{}```", res),
                         Err(e) => format!("```Failed to convert config into JSON! This should never happen. Error: {}```", e)
                     }
-                }*/
+                }
 
                 /*"config" => {
                     let mut data = ctx.data.write().await;
@@ -257,16 +268,29 @@ impl EventHandler for Handler {
         // All shells handle interaction
         let data = ctx.data.write().await;
 
-        let guild_id = {
+        if let Some(guild_id) = {
             match &interaction {
                 Interaction::Ping(_ping) => { return; }
                 Interaction::ApplicationCommand(cmd) => { cmd.guild_id }
                 Interaction::MessageComponent(cmp) => { cmp.guild_id }
             }
-        }.expect("Interaction must have guild id i guess");
-
-        let shell = data.get::<GuildShells>().unwrap().get(&guild_id).expect("nonexistent guild smh");
-        shell.channel.send(ShellEvent::NewInteraction(ctx.clone(), interaction)).await;
+        } {
+            let shell = data.get::<GuildShells>().unwrap().get(&guild_id).expect("nonexistent guild smh");
+            shell.channel.send(ShellEvent::NewInteraction(ctx.clone(), interaction)).await;
+        } else {
+            match &interaction {
+                Interaction::ApplicationCommand(cmd) => {
+                    cmd.create_interaction_response(&ctx, |resp| {
+                        resp.interaction_response_data(|data| {
+                            data.create_embed(|e| {
+                                e.title("Error").description("All commands have to be used in a guild").color(0xff0000)
+                            })
+                        })
+                    }).await;
+                }
+                _ => {}
+            };
+        }
     }
     async fn guild_create(&self, ctx: Context, guild: Guild, _is_new: bool) {
         println!("New guild! Id: {}, is new: {}", guild.id, _is_new);
@@ -310,7 +334,6 @@ async fn save_shells(dat: &mut Arc<RwLock<TypeMap>>) {
     let filename = data.get::<BaseConfigData>().unwrap().shell_config_file.clone();
     let shells = data.get_mut::<GuildShells>().unwrap();
 
-    let mut file = std::fs::File::create(filename).expect("Can't open file ");
     let mut shell_configs: HashMap<GuildId, GuildConfig> = Default::default();
 
     for (id, shell) in shells {  // TODO: Rewrite to collect configs concurrently
@@ -324,6 +347,8 @@ async fn save_shells(dat: &mut Arc<RwLock<TypeMap>>) {
     }
 
     let serialized = serde_yaml::to_string(&shell_configs).expect("Can't serialize shells");
+
+    let mut file = std::fs::File::create(filename).expect("Can't open file ");
     file.write(serialized.as_ref()).expect("File couldn't be written into");
 }
 
@@ -358,6 +383,7 @@ async fn run(config: BaseConfigData) {
     let shard_manager = client.shard_manager.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("Could not register ctrl+c handler");
+        println!("SHUTTING DOWN GRACEFULLY");
         shard_manager.lock().await.shutdown_all().await;
     });
 

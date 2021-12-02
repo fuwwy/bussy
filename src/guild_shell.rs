@@ -1,15 +1,21 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
+
+
 use chrono::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serenity::client::Context;
 use serenity::Error;
+use serenity::futures::task::AtomicWaker;
 use serenity::model::channel::Message;
 use serenity::model::guild::Member;
+
 use serenity::model::id::{ChannelId, GuildId, MessageId, RoleId, UserId};
 use serenity::prelude::{SerenityError, TypeMapKey};
 use tokio::sync::mpsc;
+
+
 
 use crate::{GuildShells, ShellContact, ShellEvent};
 use crate::config_form::Configurable;
@@ -22,6 +28,7 @@ struct RaidInfo {
 }
 
 //pub type LogData = HashMap<DateTime<Utc>, String>;
+#[derive(Debug)]
 pub struct LogData {
     records: BTreeMap<DateTime<Utc>, String>,
 }
@@ -56,6 +63,7 @@ impl TypeMapKey for LogData {
 type MessageLocation = (MessageId, ChannelId);
 
 
+#[derive(Debug)]
 pub(crate) struct MemberShell {
     pub(crate) member: Member,
     current_pressure: f64,
@@ -224,10 +232,9 @@ impl GuildConfig {
         ]
     }
 
-    async fn setup_help(&self, ctx: &Context) {
-        let guild = ctx.cache.guild(self.guild_id).await.expect("Couldn't fetch guild");
+    pub(crate) fn setup_help(&self) -> String {
         let mut helptexts: Vec<String> = Default::default();
-        helptexts.push("Recommended steps you should take:".into());
+        helptexts.push("These are the recommended steps you should take. You can change values by using the `/change` or `/config` slash command.\n".into());
         let mut optional_steps: Vec<String> = Default::default();
         optional_steps.push("Optional steps you could do to improve user experience.".into());
 
@@ -248,17 +255,7 @@ impl GuildConfig {
         }
 
 
-        let to_say = helptexts.join("\n") + &optional_steps.join("\n");
-
-        if let Some(ch) = *self.moderation_channel {
-            ch.say(&ctx, to_say).await.expect("Moderation channel must be sendable to");
-        } else {
-            for ch in guild.channels.values() {
-                if ch.say(&ctx, &to_say).await.is_ok() {
-                    break;
-                }
-            }
-        }
+        helptexts.join("\n\n") + &optional_steps.join("\n\n")
     }
 }
 /*
@@ -306,6 +303,7 @@ impl Loggable for &mut GuildShell {
 }
 
 
+#[derive(Debug)]
 pub struct GuildShell {
     pub config: GuildConfig,
     current_raid: Option<RaidInfo>,
@@ -341,6 +339,7 @@ impl GuildShell {
         });
 
         let handle = tokio::spawn(async move { new_shell.listen().await });
+        let _waker = AtomicWaker::new();
 
         let contact = ShellContact {
             channel: sender,
@@ -352,39 +351,59 @@ impl GuildShell {
         shells.insert(guild_id, contact);
     }
 
+    async fn handle_event(&mut self, event: ShellEvent) {
+        println!("Guild {} received {}", self.config.guild_id, event);
+        let res = match event {
+            ShellEvent::NewMessage(ctx, msg) => {
+                let res = self.message_created(&ctx, &msg).await;
+                self.dump_logs(&ctx).await;
+                res
+            }
+            ShellEvent::MemberJoined(ctx, member) => {
+                let res = self.member_joined(&ctx, member).await;
+                self.dump_logs(&ctx).await;
+                res
+            }
+            ShellEvent::NewInteraction(ctx, interaction) => {
+                let res = self.handle_interaction(&ctx, &interaction).await;
+                self.dump_logs(&ctx).await;
+                res
+            }
+            ShellEvent::GetConfig(sender) => {
+                if sender.send(self.config.clone()).is_ok() {
+                    Ok(())
+                } else {
+                    Err(serenity::Error::Other("Failed to respond with config"))
+                }
+            }
+        };
+        if let Err(e) = res {
+            self.slog(e.to_string());
+        }
+    }
+
     async fn listen(&mut self) {
-        loop {
-            for event in self.receiver.recv().await {
-                println!("Guild {} received {}", self.config.guild_id, event);
-                let res = match event {
-                    ShellEvent::NewMessage(ctx, msg) => {
-                        let res = self.message_created(&ctx, &msg).await;
-                        self.dump_logs(&ctx).await;
-                        res
-                    }
-                    ShellEvent::MemberJoined(ctx, member) => {
-                        let res = self.member_joined(&ctx, member).await;
-                        self.dump_logs(&ctx).await;
-                        res
-                    }
-                    ShellEvent::NewInteraction(ctx, interaction) => {
-                        let res = self.handle_interaction(&ctx, &interaction).await;
-                        self.dump_logs(&ctx).await;
-                        res
-                    }
-                    ShellEvent::GetConfig(sender) => {
-                        if sender.send(self.config.clone()).is_ok() {
-                            Ok(())
-                        } else {
-                            Err(serenity::Error::Other("Failed to respond with config"))
+        /*loop {
+            let ev = self.receiver.try_recv();
+            match ev {
+                Ok(event) => { self.handle_event(event).await; println!("Handled event lol"); }
+                Err(e) => {
+                    match e {
+                        TryRecvError::Empty => {
+                            sleep(Duration::milliseconds(500).to_std().unwrap()).await;
                         }
+                        TryRecvError::Disconnected => { return; }
                     }
-                };
-                if let Err(e) = res {
-                    self.slog(e.to_string());
                 }
             }
         }
+
+         */
+
+        while let Some(event) = self.receiver.recv().await {
+            self.handle_event(event).await
+        }
+        println!("Exiting listener for {}", self.config.guild_id);
     }
 
     pub fn get_config(&self) -> &GuildConfig {
@@ -465,14 +484,29 @@ impl GuildShell {
             }
 
             let mut deletion_failed = None;
+            let mut channel_map: HashMap<ChannelId, Vec<MessageId>> = HashMap::default();
             for msg in &shell.recent_messages {
-                match ctx.http.delete_message(msg.1.into(), msg.0.into()).await {
+                if !channel_map.contains_key(&msg.1) {
+                    channel_map.insert(msg.1, Vec::new());
+                }
+                channel_map.get_mut(&msg.1).unwrap().push(msg.0);
+
+                /*match ctx.http.delete_message(msg.1.into(), msg.0.into()).await {
                     Ok(()) => println!("Deleting a message!"),
                     Err(e) => deletion_failed = Some(e)
                 }
-            }
-            if let Some(_err) = deletion_failed {
 
+                 */
+            }
+
+            for (channel, messages) in channel_map {
+                if let Err(e) = channel.delete_messages(&ctx, messages).await {
+                    deletion_failed = Some(e);
+                }
+            }
+
+
+            if let Some(_err) = deletion_failed {
                 // self._log.slog(format!("Deleting a message failed: {}", err))
             }
 

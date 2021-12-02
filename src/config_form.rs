@@ -13,7 +13,7 @@ use crate::guild_shell::{ConfigField, GuildShell};
 
 pub trait Configurable {
     fn get_name(&self) -> &String;
-    fn get_pretty_name(&self) -> &String;
+    fn get_pretty_name(&self) -> String { self.get_name().replace("_", " ") }
     fn get_selection_key(&self) -> String {
         format!("select_{}", self.get_name())
     }
@@ -86,10 +86,6 @@ impl Configurable for ConfigField<f64> {
         &self.name
     }
 
-    fn get_pretty_name(&self) -> &String {
-        &self.name
-    }
-
     fn set_value(&mut self, new_value: String) -> Result<(), String> {
         match new_value.parse() {
             Ok(val) => {
@@ -107,10 +103,6 @@ impl Configurable for ConfigField<f64> {
 
 impl Configurable for ConfigField<Option<ChannelId>> {
     fn get_name(&self) -> &String {
-        &self.name
-    }
-
-    fn get_pretty_name(&self) -> &String {
         &self.name
     }
 
@@ -166,10 +158,6 @@ impl Configurable for ConfigField<Option<RoleId>> {
         &self.name
     }
 
-    fn get_pretty_name(&self) -> &String {
-        &self.name
-    }
-
     fn get_slash_command_type(&self) -> ApplicationCommandOptionType {
         ApplicationCommandOptionType::Role
     }
@@ -207,10 +195,6 @@ impl Configurable for ConfigField<Option<RoleId>> {
 
 impl Configurable for ConfigField<u32> {
     fn get_name(&self) -> &String {
-        &self.name
-    }
-
-    fn get_pretty_name(&self) -> &String {
         &self.name
     }
 
@@ -341,6 +325,16 @@ impl GuildShell {
                                 })
                             }).await?;
                         }
+                    }
+                    "setup" => {
+                        let helptext = self.config.setup_help();
+                        command.create_interaction_response(&ctx, |resp| {
+                            resp.interaction_response_data(|data| {
+                                data.create_embed(|e| {
+                                    e.title("Setup wizard!").description(helptext)
+                                })
+                            })
+                        }).await;
                     }
                     _ => println!("Unknown application command {}!", command.data.name)
                 }
