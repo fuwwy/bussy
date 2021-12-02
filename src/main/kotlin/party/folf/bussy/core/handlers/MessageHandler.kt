@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory
 import party.folf.bussy.Bussy
 
 class MessageHandler(val bussy: Bussy) {
-    private val log: Logger = LoggerFactory.getLogger(MessageHandler::class.java)
+    private val logger: Logger = LoggerFactory.getLogger(MessageHandler::class.java)
     private val pressureHandler = PressureHandler()
 
     fun handle(event: GuildMessageReceivedEvent) {
@@ -21,8 +21,8 @@ class MessageHandler(val bussy: Bussy) {
 
         job.invokeOnCompletion { error ->
             if (error != null) {
-                log.error("Failed to load guild ${event.guild.idLong}: $error")
-                log.trace(null, error)
+                logger.error("Failed to load guild ${event.guild.idLong}: $error")
+                logger.trace(null, error)
                 return@invokeOnCompletion
             }
             val guild = job.getCompleted()
