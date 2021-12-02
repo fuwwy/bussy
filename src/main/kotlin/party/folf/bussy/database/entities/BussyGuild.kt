@@ -18,4 +18,13 @@ class BussyGuild(id: EntityID<Long>) : LongEntity(id) {
     var silenceRole by BussyGuilds.silenceRole
     var newRole by BussyGuilds.newRole
     var roleSetupComplete by BussyGuilds.roleSetupComplete
+
+    var maxPressure by BussyGuilds.maxPressure
+    var basePressure by BussyGuilds.basePressure
+    var mediaPressure by BussyGuilds.mediaPressure
+    var charPressure by BussyGuilds.charPressure
+    var linePressure by BussyGuilds.linePressure
+    var mentionPressure by BussyGuilds.mentionPressure
+    var repeatPressure by BussyGuilds.repeatPressure
+    var pressureDropoff by BussyGuilds.pressureDropoff
 }

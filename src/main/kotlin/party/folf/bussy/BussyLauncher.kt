@@ -11,6 +11,7 @@ import kotlin.system.exitProcess
 object BussyLauncher {
     private val config: BussyConfig by lazy { loadConfig() }
     private val log: Logger = logger<BussyLauncher>()
+    lateinit var bussy: Bussy
 
     @JvmStatic
     fun main(args: Array<String>) {
@@ -18,7 +19,7 @@ object BussyLauncher {
             log.info("Starting Bussy...")
             log.info("Filtering all logs below {}", LogFilter.LEVEL)
 
-            val bussy = Bussy(config)
+            bussy = Bussy(config)
             bussy.start()
 
             log.info("Finished loading.")

@@ -1,0 +1,16 @@
+version: '3.1'
+
+services:
+  db:
+    image: postgres
+    restart: unless-stopped
+    volumes:
+      - "bussy_pgdata:/var/lib/postgresql/data"
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_PASSWORD: bussy
+      POSTGRES_USER: bussy
+volumes:
+  bussy_pgdata:
+    external: true

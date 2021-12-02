@@ -2,6 +2,9 @@ package party.folf.bussy
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import net.dv8tion.jda.api.entities.Activity
 import net.dv8tion.jda.api.entities.Message
 import net.dv8tion.jda.api.events.GenericEvent
@@ -13,9 +16,13 @@ import net.dv8tion.jda.api.sharding.DefaultShardManagerBuilder
 import net.dv8tion.jda.api.sharding.ShardManager
 import net.dv8tion.jda.api.utils.ChunkingFilter
 import net.dv8tion.jda.api.utils.cache.CacheFlag
+import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 import org.slf4j.Logger
+import party.folf.bussy.core.handlers.MessageHandler
+import party.folf.bussy.core.listeners.MessageListener
 import party.folf.bussy.core.shard.Shard
 import party.folf.bussy.database.DatabaseProvider
+import party.folf.bussy.database.entities.BussyGuild
 import java.time.Duration
 import java.time.Instant
 import java.util.*
@@ -24,14 +31,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.IntFunction
 import java.util.stream.Collectors
-import kotlin.time.ExperimentalTime
 
-class Bussy(val config: BussyConfig) {
+class Bussy(val config: BussyConfig) : CoroutineScope by CoroutineScope(Job() + CoroutineName("Bussy")) {
     private val log: Logger = logger<Bussy>()
 
     lateinit var databaseProvider: DatabaseProvider
     private val shards: ConcurrentHashMap<Int, Shard> = ConcurrentHashMap()
     lateinit var shardManager: ShardManager
+    private val messageHandler = MessageHandler(this)
 
     suspend fun start() {
         log.info("Connecting to the database...")
@@ -81,6 +88,7 @@ class Bussy(val config: BussyConfig) {
             .addEventListenerProviders(
                 // event listener providers (commands, members, etc) go here
                 listOf(
+                    IntFunction { MessageListener(messageHandler) },
                     IntFunction { shardId -> getShard(shardId).eventListener }
                 ))
             .setBulkDeleteSplittingEnabled(false)
@@ -111,5 +119,11 @@ class Bussy(val config: BussyConfig) {
 
     fun getShard(id: Int): Shard {
         return shards.computeIfAbsent(id) { Shard(id) }
+    }
+
+    suspend fun getGuild(id: Long): BussyGuild {
+        return newSuspendedTransaction(db = databaseProvider.database) {
+            BussyGuild.findById(id) ?: BussyGuild.new(id) {}
+        }
     }
 }
